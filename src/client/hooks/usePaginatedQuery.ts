@@ -101,6 +101,10 @@ function usePaginatedQuery(
 
     return () => {
       ws.current?.close()
+      nextPage.current = ""
+      previousPage.current = ""
+      setData([])
+      setLoading(false)
     }
   }, [fetchNextPage])
 

@@ -32,6 +32,7 @@ function useQuery(name: string, args?: any) {
 
     return () => {
       ws.close()
+      setData(null)
     }
   }, [name, JSON.stringify(args)])
 
