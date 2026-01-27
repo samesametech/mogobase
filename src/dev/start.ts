@@ -15,8 +15,8 @@ const files = fs.readdirSync(mogobaseFolder)
 for (const file of files) {
   if (!file.endsWith(".ts")) continue
   const filePath = path.join(mogobaseFolder, file)
-  const module = import(filePath) as any
-  if (typeof module === "function") {
+  const module = (await import(filePath)) as any
+  if (typeof module.default === "function") {
     module.default(app)
   }
 }

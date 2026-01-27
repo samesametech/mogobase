@@ -1,13 +1,12 @@
 {
   "name": "mogobase",
   "type": "module",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "",
   "main": "lib/index.js",
   "types": "types/index.d.ts",
   "author": "SameSame Tech Team",
   "license": "MIT",
-  "private": true,
   "exports": {
     ".": {
       "types": "./types/index.d.ts",
@@ -45,7 +44,7 @@
     "hono": "^4.11.3",
     "lodash.merge": "^4.6.2",
     "make-cli": "^6.0.0",
-    "mongodb": "^6.21.0",
+    "mongodb": "6.8.2",
     "react": "^19.2.3",
     "tsx": "^4.21.0",
     "zod": "^4.3.5"

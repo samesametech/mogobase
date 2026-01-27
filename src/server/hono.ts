@@ -15,7 +15,7 @@ app.get("/", (c: Context) => {
 })
 
 app.get("/ws", ws.upgradeWebSocket())
-app.use("/api/*", cors())
+app.use("/api/handlers", cors())
 app.get("/api/handlers", async (c: Context) => {
   const body = c.req.query()
   const { name, args } = body
