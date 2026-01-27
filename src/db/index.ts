@@ -1,0 +1,108 @@
+import { Collection, CreateIndexesOptions, Db, IndexDescription, MongoClient, ObjectId } from "mongodb"
+import DataLoader from "dataloader"
+import buildMongoFilters from "./buildMongoFilters"
+
+const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017"
+const MONGO_DB = process.env.MONGO_DB || "mogobase"
+
+console.log("MONGO_URI", MONGO_URI)
+console.log("MONGO_DB", MONGO_DB)
+
+class MogobaseDB {
+  static _instance: MogobaseDB
+
+  _mongoClient?: MongoClient
+  _db?: Db
+  _schemas: Map<string, any> = new Map()
+
+  constructor() {
+    if (!MogobaseDB._instance) {
+      MogobaseDB._instance = this
+    }
+    return MogobaseDB._instance
+  }
+
+  async connect(): Promise<Db> {
+    // Connect to MongoDB
+    if (this._mongoClient && this._db) {
+      return this._db
+    }
+    const client = await MongoClient.connect(MONGO_URI)
+    this._mongoClient = client
+    this._db = client.db(MONGO_DB)
+    return this._db
+  }
+
+  async disconnect() {
+    if (!this._mongoClient) return
+    await this._mongoClient.close()
+  }
+
+  get client(): MongoClient {
+    if (!this._mongoClient) {
+      throw new Error("Call connect() first")
+    }
+    return this._mongoClient
+  }
+
+  get db(): Db {
+    if (!this._db) {
+      throw new Error("Call connect() first")
+    }
+    return this._db
+  }
+
+  model(name: string): Collection {
+    if (!this._db) {
+      throw new Error("Call connect() first")
+    }
+    return this._db.collection(name)
+  }
+
+  async defineModel(
+    name: string,
+    schema?: any,
+    indexes?: {
+      indexSpecs: IndexDescription[]
+      options?: CreateIndexesOptions
+    }
+  ): Promise<Collection> {
+    if (!this._db) {
+      this._db = await this.connect()
+    }
+    let collection = this._db.collection(name)
+    if (!collection) {
+      collection = await this._db.createCollection(name)
+    }
+    if (schema) {
+      this._schemas.set(name, schema)
+    }
+    if (indexes) {
+      await collection.createIndexes(indexes.indexSpecs, indexes.options)
+    }
+
+    return collection
+  }
+}
+
+export type { MogobaseDB }
+export const Id = ObjectId
+export const buildFilters = buildMongoFilters
+export const DataLoaderGenerate = (model: string, key: string = "_id") => {
+  const DB = new MogobaseDB()
+  return new DataLoader(async (ids: readonly string[]) => {
+    console.log("DataLoader", model, key, ids)
+    const data = await DB.model(model)
+      .find({
+        [key]: {
+          $in: ids.map((id) => new Id(id)),
+        },
+      })
+      .toArray()
+
+    return ids.map((id) => data.find((item) => `${item[key]}` === id))
+  })
+}
+
+// Export singleton
+export default new MogobaseDB()
