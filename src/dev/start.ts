@@ -1,11 +1,14 @@
 import { serve } from "@hono/node-server"
 import app from "@/server/hono"
 import path from "path"
-import ws from "@/server/ws"
-
 import fs from "fs"
+import ws from "@/server/ws"
+import { config } from "dotenv"
+
 const cwd = process.cwd()
 const mogobaseFolder = path.resolve(cwd, "./mogobase")
+
+config({ path: [path.join(cwd, ".env"), path.join(cwd, ".env.local")] })
 
 let server: any
 
