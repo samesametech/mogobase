@@ -2,12 +2,6 @@ import { Collection, CreateIndexesOptions, Db, IndexDescription, MongoClient, Ob
 import DataLoader from "dataloader"
 import buildMongoFilters from "./buildMongoFilters"
 
-const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017"
-const MONGO_DB = process.env.MONGO_DB || "mogobase"
-
-console.log("MONGO_URI", MONGO_URI)
-console.log("MONGO_DB", MONGO_DB)
-
 class MogobaseDB {
   static _instance: MogobaseDB
 
@@ -23,6 +17,9 @@ class MogobaseDB {
   }
 
   async connect(): Promise<Db> {
+    const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017"
+    const MONGO_DB = process.env.MONGO_DB || "mogobase"
+
     // Connect to MongoDB
     if (this._mongoClient && this._db) {
       return this._db
