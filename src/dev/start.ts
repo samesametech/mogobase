@@ -20,7 +20,7 @@ for (const file of files) {
   const filePath = path.join(mogobaseFolder, file)
   const module = (await import(filePath)) as any
   if (typeof module.default === "function") {
-    module.default(app)
+    await module.default(app)
   }
 }
 
