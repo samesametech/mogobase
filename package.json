@@ -1,7 +1,7 @@
 {
   "name": "mogobase",
   "type": "module",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "",
   "main": "lib/index.js",
   "types": "types/index.d.ts",
@@ -36,6 +36,7 @@
     "start": "node lib/server/start.js",
     "deploy": "wrangler deploy --minify",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+    "prepublish": "npm run build"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.7",
