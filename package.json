@@ -35,7 +35,7 @@
     "build": "rm -rf lib && tsc && tsc-alias",
     "start": "node lib/server/start.js",
     "deploy": "wrangler deploy --minify",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
     "prepublish": "npm run build"
   },
   "dependencies": {
