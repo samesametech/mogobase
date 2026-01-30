@@ -4,6 +4,7 @@ function useMutation(name: string) {
   return async (args?: any) => {
     const rs = await fetch(apiUrl, {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
       },

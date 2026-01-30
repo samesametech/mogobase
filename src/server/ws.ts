@@ -20,7 +20,7 @@ class WebSocket {
     return WebSocket._instance
   }
 
-  async _handleEvent(event: any, socket: any, id: string) {
+  async _handleEvent(event: any, socket: any, id: string, headers: any) {
     const data = JSON.parse(event.data)
     const { type, name, args } = data
     if (!name) {
@@ -34,6 +34,7 @@ class WebSocket {
       const func = async (noWatch?: boolean) => {
         await DB.connect()
         rs = await handlers._runQuery(name, args, {
+          headers: headers || null,
           db: DB,
           watch: (modelName: string, pipeline?: Document[], options?: ChangeStreamOptions) => {
             if (noWatch) {
@@ -66,6 +67,7 @@ class WebSocket {
       const func = async (noWatch?: boolean) => {
         await DB.connect()
         rs = await handlers._runQuery(name, args, {
+          headers: headers || null,
           db: DB,
           watch: (modelName: string, pipeline?: Document[], options?: ChangeStreamOptions) => {
             if (noWatch) {
@@ -104,6 +106,7 @@ class WebSocket {
     } else if (type === "mutation") {
       await DB.connect()
       rs = await handlers._runMutation(name, args, {
+        headers: headers || null,
         db: DB,
       })
       socket.send(JSON.stringify({ type: "MutationResult", success: true, data: rs }))
@@ -119,6 +122,7 @@ class WebSocket {
       throw new Error("Call createNodeWebSocket() first")
     }
     return this._nodeWebSocket.upgradeWebSocket((c) => {
+      const headers = c.req.raw.headers
       const id = crypto.randomUUID()
       return {
         onMessage: (event, ws) => {
@@ -126,7 +130,7 @@ class WebSocket {
           if (!state) {
             this._state.set(id, { ws })
           }
-          this._handleEvent(event, ws, id)
+          this._handleEvent(event, ws, id, headers)
         },
         onClose: async () => {
           const state = this._state.get(id)

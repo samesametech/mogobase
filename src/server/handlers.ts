@@ -9,6 +9,7 @@ export type Context = {
   runQuery?: (name: string, args: any, ctx?: Context) => Promise<any>
   runMutation?: (name: string, args: any, ctx?: Context) => Promise<any>
   watch?: (modelName: string, pipeline?: Document[], options?: ChangeStreamOptions) => void
+  headers?: any
 }
 
 export type QueryHandler = {
@@ -16,6 +17,7 @@ export type QueryHandler = {
   handler: (
     args: any,
     ctx: {
+      headers?: any
       db: MogobaseDB
       runQuery: (name: string, args: any, ctx?: Context) => Promise<any>
       runMutation: (name: string, args: any, ctx?: Context) => Promise<any>
@@ -29,6 +31,7 @@ export type MutationHandler = {
   handler: (
     args: any,
     ctx: {
+      headers?: any
       db: MogobaseDB
       runQuery: (name: string, args: any, ctx?: Context) => Promise<any>
       runMutation: (name: string, args: any, ctx?: Context) => Promise<any>
@@ -65,6 +68,7 @@ class Handlers {
     const validated = await handler.args.safeParseAsync(args)
     if (validated.success) {
       return await handler.handler(validated.data, {
+        headers: ctx.headers || null,
         db: ctx.db || DB,
         runQuery: this._runQuery.bind(this),
         runMutation: this._runMutation.bind(this),
@@ -90,6 +94,7 @@ class Handlers {
     const validated = await handler.args.safeParseAsync(args)
     if (validated.success) {
       return await handler.handler(validated.data, {
+        headers: ctx.headers || null,
         db: ctx.db || DB,
         runQuery: this._runQuery.bind(this),
         runMutation: this._runMutation.bind(this),
