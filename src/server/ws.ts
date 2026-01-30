@@ -47,7 +47,11 @@ class WebSocket {
             const changeStream = DB.model(modelName).watch(pipeline, {
               ...(options || {}),
               fullDocument: "updateLookup",
-              resumeAfter: resumeToken,
+              ...(resumeToken
+                ? {
+                    resumeAfter: resumeToken,
+                  }
+                : {}),
             })
             this._state.set(id, { ...state, changeStream: changeStream })
             changeStream.on("change", (change) => {
@@ -75,7 +79,11 @@ class WebSocket {
             const changeStream = DB.model(modelName).watch(pipeline, {
               ...(options || {}),
               fullDocument: "updateLookup",
-              resumeAfter: resumeToken,
+              ...(resumeToken
+                ? {
+                    resumeAfter: resumeToken,
+                  }
+                : {}),
             })
             this._state.set(id, { ...state, changeStream: changeStream })
             changeStream.on("change", (change) => {
