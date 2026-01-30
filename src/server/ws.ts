@@ -40,7 +40,7 @@ class WebSocket {
               return
             }
             const state = this._state.get(id)
-            const resumeToken = state.changeStream?.resumeToken
+            const resumeToken = state.changeStream?.resumeToken || undefined
             if (state.changeStream) {
               state.changeStream.close()
             }
@@ -68,7 +68,7 @@ class WebSocket {
               return
             }
             const state = this._state.get(id)
-            const resumeToken = state.changeStream?.resumeToken
+            const resumeToken = state.changeStream?.resumeToken || undefined
             if (state.changeStream) {
               state.changeStream.close()
             }
