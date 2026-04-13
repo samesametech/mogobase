@@ -5,11 +5,13 @@
     "declaration": true,
     "declarationDir": "types",
     "outDir": "lib",
+    "rootDir": "./src",
     "moduleResolution": "Bundler",
     "strict": true,
     "skipLibCheck": true,
     "lib": [
-      "ESNext"
+      "ESNext",
+      "DOM"
     ],
     "jsx": "react-jsx",
     "jsxImportSource": "hono/jsx",
@@ -22,5 +24,6 @@
     "resolveFullPaths": true,
     "verbose": false
   },
-  "includes": ["src"]
+  "include": ["src"],
+  "exclude": ["src/client/server.ts"]
 }

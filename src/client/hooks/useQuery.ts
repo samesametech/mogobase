@@ -1,13 +1,20 @@
-import { hc } from "hono/client"
 import { useEffect, useState } from "react"
 
-const client = hc(process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL || "http://localhost:4000")
+function wsUrl(): string {
+  const override = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL
+  if (override) return override.replace(/^http/, "ws") + "/ws"
+  if (typeof window !== "undefined") {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+    return `${proto}//${window.location.host}/ws`
+  }
+  return "ws://localhost:3000/ws"
+}
 
 function useQuery(name: string, args?: any) {
   const [data, setData] = useState<any>(null)
 
   useEffect(() => {
-    const ws = client.ws.$ws(0)
+    const ws = new WebSocket(wsUrl())
 
     ws.addEventListener("open", () => {
       ws.send(

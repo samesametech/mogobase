@@ -1,7 +1,14 @@
-import { hc } from "hono/client"
 import { useCallback, useEffect, useRef, useState } from "react"
 
-const client = hc(process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL || "http://localhost:4000")
+function wsUrl(): string {
+  const override = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL
+  if (override) return override.replace(/^http/, "ws") + "/ws"
+  if (typeof window !== "undefined") {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+    return `${proto}//${window.location.host}/ws`
+  }
+  return "ws://localhost:3000/ws"
+}
 
 const mergeArray = (arr1: any[], arr2: any[], key: string, insert: boolean = false) => {
   const result = [...arr1]
@@ -35,7 +42,7 @@ function usePaginatedQuery(
 
   const nextPage = useRef<string>("")
   const previousPage = useRef<string>("")
-  const ws = useRef<WebSocket>(null)
+  const ws = useRef<WebSocket | null>(null)
 
   const fetchNextPage = useCallback(() => {
     setLoading(true)
@@ -76,7 +83,7 @@ function usePaginatedQuery(
   }, [name, JSON.stringify(args), paginationData])
 
   useEffect(() => {
-    ws.current = client.ws.$ws(0)
+    ws.current = new WebSocket(wsUrl())
 
     ws.current.addEventListener("open", () => {
       fetchNextPage()
@@ -88,8 +95,8 @@ function usePaginatedQuery(
       if (rs.type === "PaginatedQueryResult") {
         if (rs.success) {
           const { results, previous, hasPrevious, next, hasNext } = rs.data
-          nextPage.current = hasNext ? next : undefined
-          previousPage.current = hasPrevious ? previous : undefined
+          nextPage.current = hasNext ? next : ""
+          previousPage.current = hasPrevious ? previous : ""
           setData((d) => mergeArray(d, results, "_id", true))
         } else {
           console.error(rs.error)

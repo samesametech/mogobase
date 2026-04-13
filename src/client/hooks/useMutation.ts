@@ -1,4 +1,5 @@
-const apiUrl = `${process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL || "http://localhost:4000"}/api/handlers`
+const apiBase = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL || ""
+const apiUrl = `${apiBase}/api/handlers`
 
 function useMutation(name: string) {
   return async (args?: any) => {

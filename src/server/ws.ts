@@ -4,7 +4,7 @@ import handlers from "./handlers"
 import DB from "@/db"
 import { Hono } from "hono"
 import { ServerType } from "@hono/node-server"
-import { ChangeStream, ChangeStreamOptions } from "mongodb"
+import { ChangeStream, ChangeStreamOptions, Document } from "mongodb"
 
 class WebSocket {
   static _instance: WebSocket

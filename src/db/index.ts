@@ -2,17 +2,25 @@ import { Collection, CreateIndexesOptions, Db, IndexDescription, MongoClient, Ob
 import DataLoader from "dataloader"
 import buildMongoFilters from "./buildMongoFilters"
 
+const DB_GLOBAL_KEY = "__mogobase_db__"
+const dbGlobal = globalThis as unknown as Record<string, { instance?: MogobaseDB }>
+if (!dbGlobal[DB_GLOBAL_KEY]) dbGlobal[DB_GLOBAL_KEY] = {}
+
 class MogobaseDB {
-  static _instance: MogobaseDB
+  static get _instance(): MogobaseDB {
+    if (!dbGlobal[DB_GLOBAL_KEY].instance) {
+      dbGlobal[DB_GLOBAL_KEY].instance = Object.create(MogobaseDB.prototype, {
+        _schemas: { value: new Map(), writable: true, enumerable: true },
+      })
+    }
+    return dbGlobal[DB_GLOBAL_KEY].instance!
+  }
 
   _mongoClient?: MongoClient
   _db?: Db
-  _schemas: Map<string, any> = new Map()
+  _schemas!: Map<string, any>
 
   constructor() {
-    if (!MogobaseDB._instance) {
-      MogobaseDB._instance = this
-    }
     return MogobaseDB._instance
   }
 

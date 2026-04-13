@@ -1,4 +1,13 @@
-import { query, mutation, internalQuery, internalMutation, v } from "@/server/handlers"
+import {
+  query,
+  mutation,
+  internalQuery,
+  internalMutation,
+  runQuery,
+  runMutation,
+  v,
+} from "@/server/handlers"
+import { attachMogobaseWebSocket } from "@/server/attachWs"
 
 const PaginationQueryArgs = v.object({
   limit: v.number(),
@@ -9,4 +18,14 @@ const PaginationQueryArgs = v.object({
   next: v.string().optional(),
 })
 
-export { query, mutation, internalQuery, internalMutation, v, PaginationQueryArgs }
+export {
+  query,
+  mutation,
+  internalQuery,
+  internalMutation,
+  runQuery,
+  runMutation,
+  attachMogobaseWebSocket,
+  v,
+  PaginationQueryArgs,
+}

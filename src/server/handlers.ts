@@ -39,17 +39,27 @@ export type MutationHandler = {
   ) => Promise<any>
 }
 
+const GLOBAL_KEY = "__mogobase_handlers__"
+type HandlersGlobal = { instance?: Handlers }
+const g = globalThis as unknown as Record<string, HandlersGlobal>
+if (!g[GLOBAL_KEY]) g[GLOBAL_KEY] = {}
+
 class Handlers {
-  static _instance: Handlers
-  queries: Map<string, QueryHandler> = new Map()
-  mutations: Map<string, MutationHandler> = new Map()
-  _queries: Map<string, QueryHandler> = new Map()
-  _mutations: Map<string, MutationHandler> = new Map()
+  static get _instance(): Handlers {
+    if (!g[GLOBAL_KEY].instance) g[GLOBAL_KEY].instance = Object.create(Handlers.prototype, {
+      queries: { value: new Map(), enumerable: true },
+      mutations: { value: new Map(), enumerable: true },
+      _queries: { value: new Map(), enumerable: true },
+      _mutations: { value: new Map(), enumerable: true },
+    })
+    return g[GLOBAL_KEY].instance!
+  }
+  queries!: Map<string, QueryHandler>
+  mutations!: Map<string, MutationHandler>
+  _queries!: Map<string, QueryHandler>
+  _mutations!: Map<string, MutationHandler>
 
   constructor() {
-    if (!Handlers._instance) {
-      Handlers._instance = this
-    }
     return Handlers._instance
   }
 
@@ -65,7 +75,7 @@ class Handlers {
         throw new Error(`Query ${name} not found`)
       }
     }
-    const validated = await handler.args.safeParseAsync(args)
+    const validated = await handler.args.safeParseAsync(args ?? {})
     if (validated.success) {
       return await handler.handler(validated.data, {
         headers: ctx.headers || null,
@@ -91,7 +101,7 @@ class Handlers {
         throw new Error(`Mutation ${name} not found`)
       }
     }
-    const validated = await handler.args.safeParseAsync(args)
+    const validated = await handler.args.safeParseAsync(args ?? {})
     if (validated.success) {
       return await handler.handler(validated.data, {
         headers: ctx.headers || null,
@@ -136,4 +146,14 @@ export function internalMutation(name: string, c: MutationHandler) {
 
 export const v = z4
 
-export default new Handlers()
+const _singleton = new Handlers()
+
+export async function runQuery(name: string, args: any, ctx: Context = {}) {
+  return _singleton._runQuery(name, args, ctx)
+}
+
+export async function runMutation(name: string, args: any, ctx: Context = {}) {
+  return _singleton._runMutation(name, args, ctx)
+}
+
+export default _singleton
