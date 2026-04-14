@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useMogobase } from "../provider"
-import { invokeQuery } from "../runtime/invoke"
+import { runQuery } from "../../runtime"
 
 function wsUrl(): string {
   const override = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL
@@ -144,10 +144,10 @@ function usePaginatedQuery(
       if (direction === "previous" && offlinePrevRef.current) paginationArgs.previous = offlinePrevRef.current
 
       try {
-        const { data: rs } = await invokeQuery(
+        const rs = await runQuery(
           name,
           { ...(args || {}), paginationArgs },
-          { db: clientDB, onWatch: (w) => seen.add(w.modelName) }
+          { db: clientDB, watch: (modelName: string) => seen.add(modelName) }
         )
         if (cancelled) return
         if (rs && Array.isArray(rs.results)) {

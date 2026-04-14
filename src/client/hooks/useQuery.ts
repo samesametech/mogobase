@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { useMogobase } from "../provider"
-import { invokeQuery } from "../runtime/invoke"
+import { runQuery } from "../../runtime"
 
 function wsUrl(): string {
   const override = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL
@@ -50,9 +50,9 @@ function useQuery(name: string, args?: any) {
       for (const s of subs) s.unsubscribe()
       subs = []
       const seen = new Set<string>()
-      const { data: rs } = await invokeQuery(name, args, {
+      const rs = await runQuery(name, args, {
         db: clientDB,
-        onWatch: (w) => seen.add(w.modelName),
+        watch: (modelName: string) => seen.add(modelName),
       })
       if (cancelled) return
       setData(rs)

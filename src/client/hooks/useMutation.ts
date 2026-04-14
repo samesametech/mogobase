@@ -1,5 +1,5 @@
 import { useMogobase } from "../provider"
-import { invokeMutation } from "../runtime/invoke"
+import { runMutation } from "../../runtime"
 
 const apiBase = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL || ""
 const apiUrl = `${apiBase}/api/handlers`
@@ -18,7 +18,7 @@ function useMutation(name: string) {
       return await rs.json()
     }
     if (!clientDB) throw new Error("[mogobase] offline client DB not ready")
-    return await invokeMutation(name, args, { db: clientDB })
+    return await runMutation(name, args, { db: clientDB })
   }
 }
 

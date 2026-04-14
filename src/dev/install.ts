@@ -54,7 +54,7 @@ function resolveHooksTarget(cwd: string): string {
 function rewriteHookImports(source: string): string {
   return source
     .replace(/from\s+"\.\.\/provider"/g, 'from "mogobase/provider"')
-    .replace(/from\s+"\.\.\/runtime\/invoke"/g, 'from "mogobase/client-runtime"')
+    .replace(/from\s+"\.\.\/\.\.\/runtime"/g, 'from "mogobase/runtime"')
 }
 
 async function copyHookFile(installer: Installer, src: string, dest: string) {

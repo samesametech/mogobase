@@ -32,10 +32,6 @@
       "types": "./types/client/provider.d.ts",
       "default": "./lib/client/provider.js"
     },
-    "./client-runtime": {
-      "types": "./types/client/runtime/invoke.d.ts",
-      "default": "./lib/client/runtime/invoke.js"
-    },
     "./package.json": "./package.json"
   },
   "files": [
