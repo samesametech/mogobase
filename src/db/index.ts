@@ -1,6 +1,7 @@
 import { Collection, CreateIndexesOptions, Db, IndexDescription, MongoClient, ObjectId } from "mongodb"
 import DataLoader from "dataloader"
 import buildMongoFilters from "./buildMongoFilters"
+import { onModel } from "@/runtime/models"
 
 const DB_GLOBAL_KEY = "__mogobase_db__"
 const dbGlobal = globalThis as unknown as Record<string, { instance?: MogobaseDB }>
@@ -19,6 +20,7 @@ class MogobaseDB {
   _mongoClient?: MongoClient
   _db?: Db
   _schemas!: Map<string, any>
+  _modelsBound?: boolean
 
   constructor() {
     return MogobaseDB._instance
@@ -35,6 +37,15 @@ class MogobaseDB {
     const client = await MongoClient.connect(MONGO_URI)
     this._mongoClient = client
     this._db = client.db(MONGO_DB)
+
+    if (!this._modelsBound) {
+      this._modelsBound = true
+      onModel((m) => {
+        this.defineModel(m.name, m.schema, m.indexes).catch((err) =>
+          console.error(`[mogobase] failed to apply model ${m.name}`, err)
+        )
+      })
+    }
     return this._db
   }
 

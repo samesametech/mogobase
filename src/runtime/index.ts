@@ -11,6 +11,7 @@ import {
   runMutation,
   v,
 } from "@/server/handlers"
+import { defineModel, getModels, onModel, type ModelDef } from "./models"
 
 const PaginationQueryArgs = v.object({
   limit: v.number(),
@@ -30,4 +31,8 @@ export {
   runMutation,
   v,
   PaginationQueryArgs,
+  defineModel,
+  getModels,
+  onModel,
 }
+export type { ModelDef }

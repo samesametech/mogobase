@@ -49,6 +49,11 @@ export function MogobaseProvider(props: MogobaseProviderProps): React.ReactEleme
       const ClientDB = mod.default
       await ClientDB.connect(dbName)
       if (handlers) await handlers()
+      // Apply any models registered via runtime.defineModel() in handler files.
+      const { getModels } = await import("../runtime/models")
+      for (const m of getModels()) {
+        await ClientDB.defineModel(m.name, m.schema, m.indexes)
+      }
       if (cancelled) return
       setClientDB(ClientDB)
       setReady(true)
