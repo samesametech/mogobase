@@ -1,5 +1,5 @@
-import { useCallback, useContext, useEffect, useRef, useState } from "react"
-import { MogobaseContext } from "../provider"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { useMogobase } from "../provider"
 import { invokeQuery } from "../runtime/invoke"
 
 function wsUrl(): string {
@@ -37,7 +37,7 @@ function usePaginatedQuery(
   args?: any,
   paginationData: PaginationData = { pageSize: 10 }
 ) {
-  const { online, ready, clientDB } = useContext(MogobaseContext)
+  const { online, ready, clientDB } = useMogobase()
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState<boolean>(false)
 

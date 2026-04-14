@@ -1,5 +1,5 @@
-import { useContext, useEffect, useState } from "react"
-import { MogobaseContext } from "../provider"
+import { useEffect, useState } from "react"
+import { useMogobase } from "../provider"
 import { invokeQuery } from "../runtime/invoke"
 
 function wsUrl(): string {
@@ -13,7 +13,7 @@ function wsUrl(): string {
 }
 
 function useQuery(name: string, args?: any) {
-  const { online, ready, clientDB } = useContext(MogobaseContext)
+  const { online, ready, clientDB } = useMogobase()
   const [data, setData] = useState<any>(null)
 
   const argsKey = JSON.stringify(args)

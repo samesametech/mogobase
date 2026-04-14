@@ -36,17 +36,59 @@ function resolveAppApiTarget(cwd: string): string {
   return target
 }
 
+function resolveHooksTarget(cwd: string): string {
+  const existing = [path.join(cwd, "src", "hooks"), path.join(cwd, "hooks")].find((c) =>
+    fs.existsSync(c)
+  )
+  if (existing) {
+    console.log(`[hooks] Installing into ${path.relative(cwd, existing)}`)
+    return existing
+  }
+  const base = fs.existsSync(path.join(cwd, "src")) ? path.join(cwd, "src") : cwd
+  const target = path.join(base, "hooks")
+  fs.mkdirSync(target, { recursive: true })
+  console.log(`[hooks] Installing into ${path.relative(cwd, target)}`)
+  return target
+}
+
+function rewriteHookImports(source: string): string {
+  return source
+    .replace(/from\s+"\.\.\/provider"/g, 'from "mogobase/provider"')
+    .replace(/from\s+"\.\.\/runtime\/invoke"/g, 'from "mogobase/client-runtime"')
+}
+
+async function copyHookFile(installer: Installer, src: string, dest: string) {
+  const existed = fs.existsSync(dest)
+  fs.mkdirSync(path.dirname(dest), { recursive: true })
+  const content = rewriteHookImports(fs.readFileSync(src, "utf8"))
+  fs.writeFileSync(dest, content)
+  console.log(`  ${existed ? "update" : "write "}  ${path.relative(installer.cwd, dest)}`)
+}
+
 export async function install() {
   const cwd = process.cwd()
   const root = resolveMogobaseRoot()
 
   const apiSrc = path.join(root, "src/client/api/handlers")
   const serverTpl = path.join(root, "src/client/server.ts")
+  const hooksSrc = path.join(root, "src/client/hooks")
 
   const installer = new Installer(cwd)
 
-  // 1) Hooks — imported directly from the "mogobase" package now. Don't copy.
-  //    (Older installs may have ./hooks/ templates — they are unused; safe to delete.)
+  // 1) Hooks — copied as templates so consumers can customize behavior.
+  const hooksTarget = resolveHooksTarget(cwd)
+  const hookFiles = fs.readdirSync(hooksSrc).filter((f) => f.endsWith(".ts"))
+  for (const f of hookFiles) {
+    await copyHookFile(installer, path.join(hooksSrc, f), path.join(hooksTarget, f))
+  }
+  const barrel = `export { default as useQuery } from "./useQuery"
+export { default as useMutation } from "./useMutation"
+export { default as usePaginatedQuery } from "./usePaginatedQuery"
+`
+  const barrelPath = path.join(hooksTarget, "index.ts")
+  const barrelExisted = fs.existsSync(barrelPath)
+  fs.writeFileSync(barrelPath, barrel)
+  console.log(`  ${barrelExisted ? "update" : "write "}  ${path.relative(cwd, barrelPath)}`)
 
   // 2) Next.js API route
   const apiTarget = resolveAppApiTarget(cwd)
@@ -76,6 +118,8 @@ export async function install() {
   console.log(`  3. Add handler files to ./mogobase/ — import from "mogobase/runtime"`)
   console.log(`       (isomorphic: works on server and in browser for offline mode)`)
   console.log(`  4. Set MONGO_URI / MONGO_DB in .env.local`)
+  console.log(`  5. Import hooks from your local copy (customize as needed):`)
+  console.log(`       import { useQuery, useMutation, usePaginatedQuery } from "@/hooks"`)
   console.log("")
   console.log("Offline mode (optional):")
   console.log(`  • Wrap your app:`)

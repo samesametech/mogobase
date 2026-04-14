@@ -1,12 +1,11 @@
-import { useContext } from "react"
-import { MogobaseContext } from "../provider"
+import { useMogobase } from "../provider"
 import { invokeMutation } from "../runtime/invoke"
 
 const apiBase = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL || ""
 const apiUrl = `${apiBase}/api/handlers`
 
 function useMutation(name: string) {
-  const { online, clientDB } = useContext(MogobaseContext)
+  const { online, clientDB } = useMogobase()
 
   return async (args?: any) => {
     if (online) {

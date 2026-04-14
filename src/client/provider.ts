@@ -1,3 +1,4 @@
+"use client"
 // <MogobaseProvider online handlers> — runtime flag + handler bootstrap for hooks.
 // Written with React.createElement to avoid JSX (tsconfig.jsxImportSource is hono/jsx).
 
@@ -9,16 +10,16 @@ export type MogobaseContextValue = {
   clientDB: any | null
 }
 
-const defaultValue: MogobaseContextValue = {
-  online: true,
-  ready: true,
-  clientDB: null,
-}
-
-export const MogobaseContext = React.createContext<MogobaseContextValue>(defaultValue)
+export const MogobaseContext = React.createContext<MogobaseContextValue | null>(null)
 
 export function useMogobase(): MogobaseContextValue {
-  return React.useContext(MogobaseContext)
+  const ctx = React.useContext(MogobaseContext)
+  if (!ctx) {
+    throw new Error(
+      "[mogobase] MogobaseContext not found — wrap your app in <MogobaseProvider>."
+    )
+  }
+  return ctx
 }
 
 export type MogobaseProviderProps = {
