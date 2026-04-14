@@ -80,13 +80,23 @@ class MogobaseDB {
       collection = await this._db.createCollection(name)
     }
     if (schema) {
-      this._schemas.set(name, schema)
+      this._schemas.set(name, { schema, indexes })
+    } else if (indexes) {
+      this._schemas.set(name, { indexes })
     }
     if (indexes) {
       await collection.createIndexes(indexes.indexSpecs, indexes.options)
     }
 
     return collection
+  }
+
+  getSchema(name: string): { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions } } | undefined {
+    return this._schemas.get(name)
+  }
+
+  getSchemas(): Map<string, { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions } }> {
+    return this._schemas
   }
 }
 

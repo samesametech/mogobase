@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useContext, useEffect, useRef, useState } from "react"
+import { MogobaseContext } from "../provider"
+import { invokeQuery } from "../runtime/invoke"
 
 function wsUrl(): string {
   const override = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL
@@ -33,10 +35,9 @@ type PaginationData = {
 function usePaginatedQuery(
   name: string,
   args?: any,
-  paginationData: PaginationData = {
-    pageSize: 10,
-  }
+  paginationData: PaginationData = { pageSize: 10 }
 ) {
+  const { online, ready, clientDB } = useContext(MogobaseContext)
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState<boolean>(false)
 
@@ -44,6 +45,9 @@ function usePaginatedQuery(
   const previousPage = useRef<string>("")
   const ws = useRef<WebSocket | null>(null)
 
+  const argsKey = JSON.stringify(args)
+
+  // --- Online (WebSocket) path ---
   const fetchNextPage = useCallback(() => {
     setLoading(true)
     ws.current?.send(
@@ -61,7 +65,7 @@ function usePaginatedQuery(
         },
       })
     )
-  }, [name, JSON.stringify(args), paginationData])
+  }, [name, argsKey, paginationData])
 
   const fetchPreviousPage = useCallback(() => {
     setLoading(true)
@@ -80,52 +84,129 @@ function usePaginatedQuery(
         },
       })
     )
-  }, [name, JSON.stringify(args), paginationData])
+  }, [name, argsKey, paginationData])
+
+  // --- Offline path state ---
+  const offlineNextRef = useRef<string>("")
+  const offlinePrevRef = useRef<string>("")
+  const offlineRunRef = useRef<((direction?: "next" | "previous") => Promise<void>) | null>(null)
 
   useEffect(() => {
-    ws.current = new WebSocket(wsUrl())
+    if (online) {
+      ws.current = new WebSocket(wsUrl())
 
-    ws.current.addEventListener("open", () => {
-      fetchNextPage()
-    })
+      ws.current.addEventListener("open", () => {
+        fetchNextPage()
+      })
 
-    ws.current.addEventListener("message", (event) => {
-      setLoading(false)
-      const rs = JSON.parse(event.data)
-      if (rs.type === "PaginatedQueryResult") {
-        if (rs.success) {
-          const { results, previous, hasPrevious, next, hasNext } = rs.data
-          nextPage.current = hasNext ? next : ""
-          previousPage.current = hasPrevious ? previous : ""
-          setData((d) => mergeArray(d, results, "_id", true))
-        } else {
-          console.error(rs.error)
+      ws.current.addEventListener("message", (event) => {
+        setLoading(false)
+        const rs = JSON.parse(event.data)
+        if (rs.type === "PaginatedQueryResult") {
+          if (rs.success) {
+            const { results, previous, hasPrevious, next, hasNext } = rs.data
+            nextPage.current = hasNext ? next : ""
+            previousPage.current = hasPrevious ? previous : ""
+            setData((d) => mergeArray(d, results, "_id", true))
+          } else {
+            console.error(rs.error)
+          }
+        } else if (rs.type === "UpdateDoc") {
+          setData((d) => mergeArray(d, [rs.data], "_id"))
         }
-      } else if (rs.type === "UpdateDoc") {
-        setData((d) => mergeArray(d, [rs.data], "_id"))
+      })
+
+      return () => {
+        ws.current?.close()
+        nextPage.current = ""
+        previousPage.current = ""
+        setData([])
+        setLoading(false)
       }
-    })
+    }
+
+    // Offline path.
+    if (!ready || !clientDB) return
+    let cancelled = false
+    let subs: Array<{ unsubscribe: () => void }> = []
+
+    const run = async (direction?: "next" | "previous") => {
+      setLoading(true)
+      for (const s of subs) s.unsubscribe()
+      subs = []
+      const seen = new Set<string>()
+      const paginationArgs: any = {
+        limit: paginationData.pageSize,
+        sortAscending: paginationData.sortAscending ?? true,
+        sortCaseInsensitive: paginationData.sortCaseInsensitive ?? false,
+      }
+      if (direction === "next" && offlineNextRef.current) paginationArgs.next = offlineNextRef.current
+      if (direction === "previous" && offlinePrevRef.current) paginationArgs.previous = offlinePrevRef.current
+
+      try {
+        const { data: rs } = await invokeQuery(
+          name,
+          { ...(args || {}), paginationArgs },
+          { db: clientDB, onWatch: (w) => seen.add(w.modelName) }
+        )
+        if (cancelled) return
+        if (rs && Array.isArray(rs.results)) {
+          const { results, previous, hasPrevious, next, hasNext } = rs
+          offlineNextRef.current = hasNext ? next : ""
+          offlinePrevRef.current = hasPrevious ? previous : ""
+          nextPage.current = offlineNextRef.current
+          previousPage.current = offlinePrevRef.current
+          setData((d) => (direction ? mergeArray(d, results, "_id", true) : results))
+        }
+      } catch (err) {
+        console.error(err)
+      } finally {
+        setLoading(false)
+      }
+
+      for (const m of seen) {
+        try {
+          const rx = (clientDB as any).model(m)._rx
+          const sub = rx.$.subscribe(() => {
+            if (!cancelled) run()
+          })
+          subs.push(sub)
+        } catch (err) {
+          console.warn(`[mogobase] watch: model ${m} not available`, err)
+        }
+      }
+    }
+    offlineRunRef.current = run
+    run()
 
     return () => {
-      ws.current?.close()
+      cancelled = true
+      for (const s of subs) s.unsubscribe()
+      offlineRunRef.current = null
+      offlineNextRef.current = ""
+      offlinePrevRef.current = ""
       nextPage.current = ""
       previousPage.current = ""
       setData([])
       setLoading(false)
     }
-  }, [fetchNextPage])
+  }, [online, ready, name, argsKey, paginationData.pageSize, fetchNextPage])
 
   const loadNext = useCallback(() => {
-    if (nextPage.current) {
-      fetchNextPage()
+    if (!online) {
+      if (offlineNextRef.current) offlineRunRef.current?.("next")
+      return
     }
-  }, [fetchNextPage])
+    if (nextPage.current) fetchNextPage()
+  }, [online, fetchNextPage])
 
   const loadPrevious = useCallback(() => {
-    if (previousPage.current) {
-      fetchPreviousPage()
+    if (!online) {
+      if (offlinePrevRef.current) offlineRunRef.current?.("previous")
+      return
     }
-  }, [fetchPreviousPage])
+    if (previousPage.current) fetchPreviousPage()
+  }, [online, fetchPreviousPage])
 
   return {
     results: data,

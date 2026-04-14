@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react"
+import { useContext, useEffect, useState } from "react"
+import { MogobaseContext } from "../provider"
+import { invokeQuery } from "../runtime/invoke"
 
 function wsUrl(): string {
   const override = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL
@@ -11,37 +13,70 @@ function wsUrl(): string {
 }
 
 function useQuery(name: string, args?: any) {
+  const { online, ready, clientDB } = useContext(MogobaseContext)
   const [data, setData] = useState<any>(null)
 
+  const argsKey = JSON.stringify(args)
+
   useEffect(() => {
-    const ws = new WebSocket(wsUrl())
+    if (online) {
+      const ws = new WebSocket(wsUrl())
 
-    ws.addEventListener("open", () => {
-      ws.send(
-        JSON.stringify({
-          type: "query",
-          name,
-          args,
-        })
-      )
-    })
+      ws.addEventListener("open", () => {
+        ws.send(JSON.stringify({ type: "query", name, args }))
+      })
 
-    ws.addEventListener("message", (event) => {
-      const rs = JSON.parse(event.data)
-      if (rs.type === "QueryResult") {
-        if (rs.success) {
-          setData(rs.data)
-        } else {
-          console.error(rs.error)
+      ws.addEventListener("message", (event) => {
+        const rs = JSON.parse(event.data)
+        if (rs.type === "QueryResult") {
+          if (rs.success) setData(rs.data)
+          else console.error(rs.error)
+        }
+      })
+
+      return () => {
+        ws.close()
+        setData(null)
+      }
+    }
+
+    // Offline: run the handler locally; re-run whenever any watched model emits.
+    if (!ready || !clientDB) return
+
+    let cancelled = false
+    let subs: Array<{ unsubscribe: () => void }> = []
+
+    const run = async () => {
+      for (const s of subs) s.unsubscribe()
+      subs = []
+      const seen = new Set<string>()
+      const { data: rs } = await invokeQuery(name, args, {
+        db: clientDB,
+        onWatch: (w) => seen.add(w.modelName),
+      })
+      if (cancelled) return
+      setData(rs)
+      for (const m of seen) {
+        try {
+          const rx = (clientDB as any).model(m)._rx
+          const sub = rx.$.subscribe(() => {
+            if (!cancelled) run()
+          })
+          subs.push(sub)
+        } catch (err) {
+          console.warn(`[mogobase] watch: model ${m} not available`, err)
         }
       }
-    })
+    }
+
+    run().catch((err) => console.error(err))
 
     return () => {
-      ws.close()
+      cancelled = true
+      for (const s of subs) s.unsubscribe()
       setData(null)
     }
-  }, [name, JSON.stringify(args)])
+  }, [online, ready, name, argsKey])
 
   return data
 }

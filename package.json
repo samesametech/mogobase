@@ -20,6 +20,22 @@
       "types": "./types/db/index.d.ts",
       "default": "./lib/db/index.js"
     },
+    "./runtime": {
+      "types": "./types/runtime/index.d.ts",
+      "default": "./lib/runtime/index.js"
+    },
+    "./client-db": {
+      "types": "./types/client/db/index.d.ts",
+      "default": "./lib/client/db/index.js"
+    },
+    "./provider": {
+      "types": "./types/client/provider.d.ts",
+      "default": "./lib/client/provider.js"
+    },
+    "./client-runtime": {
+      "types": "./types/client/runtime/invoke.d.ts",
+      "default": "./lib/client/runtime/invoke.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -58,8 +74,9 @@
     "hono": "^4.11.3",
     "lodash.merge": "^4.6.2",
     "make-cli": "^6.0.0",
-    "mongodb": "6.8.2",
-    "react": "^19.2.3",
+    "mongodb": "^6.21.0",
+    "react": ">=18",
+    "rxdb": "^17.1.0",
     "tsx": "^4.21.0",
     "ws": "^8.20.0",
     "zod": "^4.3.5"

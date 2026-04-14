@@ -60,9 +60,10 @@ const processFilter = (filter: any, opts?: any) => {
       // output = { "$and":[{"email":{"$regex":".*chardy@gmail.com.*"}},{"email":{"$regex":".*abc@gmail.com.*"}}] }
       filters = { $and: processOrAndFilter(filter[key]) }
     } else if (key.indexOf("_id") > 0 && key.includes("Id")) {
-      // query = filter: { _id: "5f8d9f1d-d3a1-4d0d-b5a8-c8e8c2e3d4e5" }
-      // output = { _id: new ObjectId("5f8d9f1d-d3a1-4d0d-b5a8-c8e8c2e3d4e5") }
-      filters = { [key.replace("_id", "")]: new ObjectId(filter[key]) }
+      // query = filter: { userId_id: "5f8d..." } → output = { userId: ObjectId(...) }
+      // When coerceObjectId === false (e.g., RxDB), keep the value as string.
+      const value = opts?.coerceObjectId === false ? filter[key] : new ObjectId(filter[key])
+      filters = { [key.replace("_id", "")]: value }
     } else if (key.includes("_eq")) {
       // equal ==
       // query = filter: { amount_eq: 20}

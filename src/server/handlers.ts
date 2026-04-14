@@ -1,11 +1,10 @@
 import z4 from "zod/v4"
 
-import DB from "@/db"
 import type { MogobaseDB } from "@/db"
-import { ChangeStreamOptions, Document } from "mongodb"
+import type { ChangeStreamOptions, Document } from "mongodb"
 
 export type Context = {
-  db?: MogobaseDB
+  db?: any
   runQuery?: (name: string, args: any, ctx?: Context) => Promise<any>
   runMutation?: (name: string, args: any, ctx?: Context) => Promise<any>
   watch?: (modelName: string, pipeline?: Document[], options?: ChangeStreamOptions) => void
@@ -63,7 +62,7 @@ class Handlers {
     return Handlers._instance
   }
 
-  async _runQuery(name: string, args: any, ctx: Context = {}) {
+  async _runQuery(name: string, args: any, ctx: Context = {}): Promise<any> {
     let handler = this.queries.get(name)
     if (!handler) {
       if (name.startsWith("internal")) {
@@ -75,13 +74,14 @@ class Handlers {
         throw new Error(`Query ${name} not found`)
       }
     }
+    if (!ctx.db) throw new Error("ctx.db is required — pass the mogobase/db or mogobase/client-db instance")
     const validated = await handler.args.safeParseAsync(args ?? {})
     if (validated.success) {
       return await handler.handler(validated.data, {
         headers: ctx.headers || null,
-        db: ctx.db || DB,
-        runQuery: this._runQuery.bind(this),
-        runMutation: this._runMutation.bind(this),
+        db: ctx.db,
+        runQuery: (n, a, c) => this._runQuery(n, a, { db: ctx.db, headers: ctx.headers, ...(c || {}) }),
+        runMutation: (n, a, c) => this._runMutation(n, a, { db: ctx.db, headers: ctx.headers, ...(c || {}) }),
         watch: ctx.watch || (() => {}),
       })
     } else {
@@ -89,7 +89,7 @@ class Handlers {
     }
   }
 
-  async _runMutation(name: string, args: any, ctx: Context = {}) {
+  async _runMutation(name: string, args: any, ctx: Context = {}): Promise<any> {
     let handler = this.mutations.get(name)
     if (!handler) {
       if (name.startsWith("internal")) {
@@ -101,13 +101,14 @@ class Handlers {
         throw new Error(`Mutation ${name} not found`)
       }
     }
+    if (!ctx.db) throw new Error("ctx.db is required — pass the mogobase/db or mogobase/client-db instance")
     const validated = await handler.args.safeParseAsync(args ?? {})
     if (validated.success) {
       return await handler.handler(validated.data, {
         headers: ctx.headers || null,
-        db: ctx.db || DB,
-        runQuery: this._runQuery.bind(this),
-        runMutation: this._runMutation.bind(this),
+        db: ctx.db,
+        runQuery: (n, a, c) => this._runQuery(n, a, { db: ctx.db, headers: ctx.headers, ...(c || {}) }),
+        runMutation: (n, a, c) => this._runMutation(n, a, { db: ctx.db, headers: ctx.headers, ...(c || {}) }),
       })
     } else {
       throw new Error(`Invalid args: ${validated.error.issues[0].message}`)

@@ -1,21 +1,25 @@
+import { useContext } from "react"
+import { MogobaseContext } from "../provider"
+import { invokeMutation } from "../runtime/invoke"
+
 const apiBase = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL || ""
 const apiUrl = `${apiBase}/api/handlers`
 
 function useMutation(name: string) {
+  const { online, clientDB } = useContext(MogobaseContext)
+
   return async (args?: any) => {
-    const rs = await fetch(apiUrl, {
-      method: "POST",
-      credentials: "include",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        name,
-        args,
-      }),
-    })
-    const data = await rs.json()
-    return data
+    if (online) {
+      const rs = await fetch(apiUrl, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, args }),
+      })
+      return await rs.json()
+    }
+    if (!clientDB) throw new Error("[mogobase] offline client DB not ready")
+    return await invokeMutation(name, args, { db: clientDB })
   }
 }
 
