@@ -37,7 +37,12 @@ There are no tests or linters configured. Do not add CI/lint/test tooling withou
 
 ### Client (`src/client/`)
 
-- `hooks/` — React hooks (`useQuery`, `useMutation`, `usePaginatedQuery`). `useMutation` POSTs to `/api/handlers`; `useQuery`/`usePaginatedQuery` open a native `WebSocket` to `/ws`. URLs are same-origin (derived from `window.location`), with `NEXT_MOGOBASE_URL` / `MOGOBASE_URL` env override for SSR or split-origin deploys. Also compiled into `lib/` and re-exported from the package root.
+- `hooks/` — React hooks (`useQuery`, `useMutation`, `usePaginatedQuery`). `useMutation` POSTs to `/api/handlers`; `useQuery`/`usePaginatedQuery` open a native `WebSocket` to `/ws` when online, and when offline fall back to running the handlers directly against the provider's `clientDB`, re-running on `clientDB.observeChanges(collectionName)` events. URLs are same-origin (derived from `window.location`), with `NEXT_MOGOBASE_URL` / `MOGOBASE_URL` env override for SSR or split-origin deploys. Also compiled into `lib/` and re-exported from the package root.
+- `provider.ts` — `MogobaseProvider` / `useMogobase` context. Takes `online`, `handlers` (async loader), `dbName`, and `offlineAdapter` (`"rxdb"` default | `"watermelon"`). When `online={false}`, lazy-imports the chosen backend (`./db` or `./db/watermelon`), calls `connect(dbName)`, runs the handler loader, then replays `getModels()` from the runtime registry into `clientDB.defineModel(...)`. The selected backend's default export becomes the `clientDB` context value.
+- `db/` — pluggable offline backends. The top-level `db/index.ts` re-exports the RxDB backend so `await import("./db")` keeps working.
+  - `db/rxdb/` — `MogobaseClientDB` + `RxMongoAdapter` over RxDB + Dexie. `observeChanges(name)` wraps `collection.$` for reactivity.
+  - `db/watermelon/` — `MogobaseWatermelonDB` + `WatermelonMongoAdapter` + `filters.ts` (JS-side Mongo matcher + update applier). Each model is one table with `data` (JSON blob) + `deleted_at` (indexed) columns; filters are evaluated in JS on the decoded blob. `observeChanges(name)` wraps `Database.withChangesForTables([name])` and **skips the replay-on-subscribe emission** so `useQuery` doesn't loop on mount. WatermelonDB requires all `defineModel` calls to occur **before** the DB is first accessed; `defineModel` throws if called after `_ensureDb()` for an unknown model, but is idempotent for already-registered models (safe under React strict-mode double-mount).
+- Both backends conform to the same interface: `connect(dbName)`, `defineModel(name, schema?, indexes?)`, `model(name)` → Mongo-shaped adapter, `observeChanges(name)`, default export = singleton. Hooks reach into neither backend's internals.
 - `api/handlers/route.ts` — Next.js App Router route template. **In-process**: imports `runQuery` / `runMutation` from `mogobase/server` and the `DB` singleton from `mogobase/db`, calls them directly.
 - `server.ts` — Custom Next.js server template. Creates Node `http.Server`, delegates to Next.js `getRequestHandler()`, calls `attachMogobaseWebSocket(server)`, and loads consumer's `./mogobase/*.ts` files at boot to trigger handler registration. This file is excluded from `tsc` compilation (imports `next` which is a peer dep) and shipped as raw source.
 - All three (`hooks/`, `api/`, `server.ts`) ship as raw `.ts` source via `files` in `package.json` so `mogobase install` can copy them into the caller.
@@ -54,7 +59,7 @@ There are no tests or linters configured. Do not add CI/lint/test tooling withou
 
 ### How a consumer uses this package (Next.js App Router)
 
-1. `yarn add mogobase ws` and `yarn add -D @types/ws`.
+1. `yarn add mogobase ws` and `yarn add -D @types/ws`. For the WatermelonDB offline backend, also `yarn add @nozbe/watermelondb` (optional peer dep).
 2. `npx mogobase install` — copies hooks, `app/api/handlers/route.ts`, and `server.ts`; creates `./mogobase/`.
 3. Update `package.json` scripts: `"dev": "tsx server.ts"`, `"start": "NODE_ENV=production tsx server.ts"`.
 4. Add handler files in `./mogobase/*.ts` that call `query()`/`mutation()` at module scope.

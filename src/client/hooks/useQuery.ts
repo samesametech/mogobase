@@ -58,8 +58,7 @@ function useQuery(name: string, args?: any) {
       setData(rs)
       for (const m of seen) {
         try {
-          const rx = (clientDB as any).model(m)._rx
-          const sub = rx.$.subscribe(() => {
+          const sub = (clientDB as any).observeChanges(m).subscribe(() => {
             if (!cancelled) run()
           })
           subs.push(sub)

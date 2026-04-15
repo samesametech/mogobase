@@ -1,10 +1,10 @@
 # mogobase
 
-A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive queries over WebSockets, Convex-style typed handlers, and **offline support** via RxDB.
+A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive queries over WebSockets, Convex-style typed handlers, and **offline support** via RxDB or WatermelonDB.
 
 - **Typed handlers** — define `query()` / `mutation()` with zod-validated args.
 - **Reactive queries** — `useQuery` / `usePaginatedQuery` hooks subscribe via WebSocket and re-run on MongoDB change streams.
-- **Offline mode** — same handlers run in the browser against RxDB/IndexedDB when the app is offline. Toggle with `<MogobaseProvider online={...}>`.
+- **Offline mode** — same handlers run in the browser against RxDB/IndexedDB (default) or WatermelonDB/LokiJS when the app is offline. Toggle with `<MogobaseProvider online={...} offlineAdapter="rxdb" | "watermelon">`.
 - **One server** — a custom Next.js `server.ts` serves both your app and the mogobase WS endpoint.
 - **MongoDB-native** — thin wrapper around the official driver; no ORM, no schema lock-in.
 
@@ -128,7 +128,13 @@ export function Providers({ children }: { children: React.ReactNode }) {
 ```
 
 - `online={true}` — hooks talk to the server (WebSocket for queries, POST for mutations).
-- `online={false}` — handlers run in the browser against RxDB (Dexie/IndexedDB). RxDB is **lazy-loaded**, so online-only consumers don't pay the bundle cost.
+- `online={false}` — handlers run in the browser against the selected offline backend. The chosen backend is **lazy-loaded**, so online-only consumers don't pay the bundle cost.
+- `offlineAdapter` — `"rxdb"` (default; RxDB + Dexie/IndexedDB) or `"watermelon"` (WatermelonDB + LokiJS/IncrementalIDB). Install the matching peer dep for whichever you pick — `rxdb` is bundled, `@nozbe/watermelondb` is an optional peer:
+  ```bash
+  # watermelon backend only
+  yarn add @nozbe/watermelondb
+  ```
+  Both backends expose the same Mongo-shaped `ctx.db.model(...)` surface, so handler code doesn't change.
 - `handlers` — an async loader that imports your `./mogobase` folder so handler registrations run on the client.
 
 ### 3. Consume from React
@@ -162,7 +168,7 @@ export default function Tasks() {
 }
 ```
 
-The hooks branch on the provider's `online` flag: online they use WebSocket + HTTP, offline they run the same handlers against RxDB and subscribe to local change events. Your component code doesn't change.
+The hooks branch on the provider's `online` flag: online they use WebSocket + HTTP, offline they run the same handlers against the selected offline backend (RxDB or WatermelonDB) and subscribe to local change events via `clientDB.observeChanges(name)`. Your component code doesn't change.
 
 ### 4. Run it
 
@@ -190,6 +196,7 @@ yarn dev
 | `mogobase/server`      | server only    | Lower-level registration + `runQuery` / `runMutation`  |
 | `mogobase/db`          | server only    | `MogobaseDB` singleton and `Id` / `buildFilters`       |
 | `mogobase/client-db`   | client only    | RxDB-backed `ClientDB` (used internally by provider)   |
+| `mogobase/client-db/watermelon` | client only | WatermelonDB-backed `ClientDB` (used internally by provider) |
 
 Prefer `mogobase/runtime` for anything that might run in the browser.
 

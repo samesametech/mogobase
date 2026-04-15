@@ -27,13 +27,16 @@ export type MogobaseProviderProps = {
   // Async loader that registers handlers on the runtime singleton. Typical:
   //   handlers={() => import("@/mogobase")}
   handlers?: () => Promise<unknown>
-  // Optional custom DB name for Dexie.
+  // Optional custom DB name for Dexie / LokiJS.
   dbName?: string
+  // Offline storage backend. Default "rxdb" (RxDB + Dexie). "watermelon" selects
+  // WatermelonDB + LokiJS — install @nozbe/watermelondb as a peer dep.
+  offlineAdapter?: "rxdb" | "watermelon"
   children?: React.ReactNode
 }
 
 export function MogobaseProvider(props: MogobaseProviderProps): React.ReactElement {
-  const { online, handlers, dbName, children } = props
+  const { online, handlers, dbName, offlineAdapter = "rxdb", children } = props
   const [ready, setReady] = React.useState<boolean>(online ? true : false)
   const [clientDB, setClientDB] = React.useState<any | null>(null)
 
@@ -44,10 +47,13 @@ export function MogobaseProvider(props: MogobaseProviderProps): React.ReactEleme
         setReady(true)
         return
       }
-      // Lazy-load the RxDB-backed ClientDB so online-only consumers don't
-      // ship RxDB/Dexie to the browser.
-      const mod = await import("./db")
-      const ClientDB = mod.default
+      // Lazy-load the chosen offline backend so online-only consumers don't
+      // ship it to the browser.
+      const mod =
+        offlineAdapter === "watermelon"
+          ? await import("./db/watermelon")
+          : await import("./db")
+      const ClientDB = (mod as any).default
       await ClientDB.connect(dbName)
       if (handlers) await handlers()
       // Apply any models registered via runtime.defineModel() in handler files.
@@ -66,7 +72,7 @@ export function MogobaseProvider(props: MogobaseProviderProps): React.ReactEleme
     return () => {
       cancelled = true
     }
-  }, [online, handlers, dbName])
+  }, [online, handlers, dbName, offlineAdapter])
 
   const value = React.useMemo<MogobaseContextValue>(
     () => ({ online, ready, clientDB }),

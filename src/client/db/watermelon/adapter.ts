@@ -1,0 +1,208 @@
+// Mongo-shaped adapter over a WatermelonDB table. Each model table has two
+// columns — `data` (JSON blob of the full record) and `deleted_at` (soft-delete
+// marker, indexed at the Loki layer). Queries prune deleted rows at the storage
+// layer, then evaluate the rest of the Mongo filter in JS on decoded docs.
+
+import { Database, Q } from "@nozbe/watermelondb"
+
+import { applyUpdate, decodeRaw, genId, getPath, matches, MongoFilter, MongoUpdate } from "./filters"
+
+class FindCursor {
+  private _sort?: any
+  private _skip?: number
+  private _limit?: number
+
+  constructor(private wdb: Database, private tableName: string, private filter: MongoFilter) {}
+
+  sort(spec: any) {
+    this._sort = spec
+    return this
+  }
+  skip(n: number) {
+    this._skip = n
+    return this
+  }
+  limit(n: number) {
+    this._limit = n
+    return this
+  }
+  project(_p: any) {
+    return this
+  }
+
+  private async fetchAll(): Promise<any[]> {
+    const records: any[] = await this.wdb
+      .get(this.tableName)
+      .query(Q.where("deleted_at", null))
+      .fetch()
+    const docs = records.map((r) => decodeRaw((r as any)._raw))
+    const filtered = docs.filter((d) => matches(d, this.filter))
+    if (this._sort) {
+      const entries = Array.isArray(this._sort)
+        ? this._sort
+        : Object.entries(this._sort).map(([k, v]) => [k, v])
+      filtered.sort((a, b) => {
+        for (const [k, dir] of entries as [string, any][]) {
+          const av = getPath(a, k)
+          const bv = getPath(b, k)
+          if (av === bv) continue
+          const cmp = av < bv ? -1 : 1
+          return dir === 1 || dir === "asc" ? cmp : -cmp
+        }
+        return 0
+      })
+    }
+    const start = this._skip || 0
+    const end = typeof this._limit === "number" ? start + this._limit : undefined
+    return filtered.slice(start, end)
+  }
+
+  async toArray(): Promise<any[]> {
+    return this.fetchAll()
+  }
+
+  async count(): Promise<number> {
+    return (await this.fetchAll()).length
+  }
+}
+
+export class WatermelonMongoAdapter {
+  constructor(public _wdb: Database, public name: string) {}
+
+  private coll() {
+    return this._wdb.get(this.name)
+  }
+
+  find(filter: MongoFilter = {}) {
+    return new FindCursor(this._wdb, this.name, filter)
+  }
+
+  async findOne(filter: MongoFilter = {}): Promise<any | null> {
+    const out = await new FindCursor(this._wdb, this.name, filter).limit(1).toArray()
+    return out[0] ?? null
+  }
+
+  async insertOne(doc: any): Promise<{ acknowledged: true; insertedId: string }> {
+    const _id = doc._id || genId()
+    const record = { deletedAt: null, ...doc, _id }
+    await this._wdb.write(async () => {
+      await this.coll().create((r: any) => {
+        r._raw.id = _id
+        r._raw.data = JSON.stringify(record)
+        r._raw.deleted_at = null
+      })
+    })
+    return { acknowledged: true, insertedId: _id }
+  }
+
+  async insertMany(docs: any[]): Promise<{ acknowledged: true; insertedIds: Record<number, string> }> {
+    const ids: Record<number, string> = {}
+    await this._wdb.write(async () => {
+      const prepared = docs.map((d, i) => {
+        const _id = d._id || genId()
+        ids[i] = _id
+        const record = { deletedAt: null, ...d, _id }
+        return this.coll().prepareCreate((r: any) => {
+          r._raw.id = _id
+          r._raw.data = JSON.stringify(record)
+          r._raw.deleted_at = null
+        })
+      })
+      await this._wdb.batch(...prepared)
+    })
+    return { acknowledged: true, insertedIds: ids }
+  }
+
+  async updateOne(filter: MongoFilter, update: MongoUpdate) {
+    const target = await this.findOne(filter)
+    if (!target) return { acknowledged: true, matchedCount: 0, modifiedCount: 0 }
+    const next = applyUpdate(target, update)
+    await this._wdb.write(async () => {
+      const record = await this.coll().find(target._id)
+      await record.update((r: any) => {
+        r._raw.data = JSON.stringify(next)
+        if (Object.prototype.hasOwnProperty.call(next, "deletedAt")) {
+          r._raw.deleted_at = next.deletedAt ?? null
+        }
+      })
+    })
+    return { acknowledged: true, matchedCount: 1, modifiedCount: 1 }
+  }
+
+  async updateMany(filter: MongoFilter, update: MongoUpdate) {
+    const targets = await this.find(filter).toArray()
+    await this._wdb.write(async () => {
+      const ops = await Promise.all(
+        targets.map(async (t) => {
+          const next = applyUpdate(t, update)
+          const record = await this.coll().find(t._id)
+          return record.prepareUpdate((r: any) => {
+            r._raw.data = JSON.stringify(next)
+            if (Object.prototype.hasOwnProperty.call(next, "deletedAt")) {
+              r._raw.deleted_at = next.deletedAt ?? null
+            }
+          })
+        })
+      )
+      await this._wdb.batch(...ops)
+    })
+    return { acknowledged: true, matchedCount: targets.length, modifiedCount: targets.length }
+  }
+
+  async deleteOne(filter: MongoFilter) {
+    const target = await this.findOne(filter)
+    if (!target) return { acknowledged: true, deletedCount: 0 }
+    const now = new Date().toISOString()
+    const next = { ...target, deletedAt: now }
+    await this._wdb.write(async () => {
+      const record = await this.coll().find(target._id)
+      await record.update((r: any) => {
+        r._raw.data = JSON.stringify(next)
+        r._raw.deleted_at = now
+      })
+    })
+    return { acknowledged: true, deletedCount: 1 }
+  }
+
+  async deleteMany(filter: MongoFilter) {
+    const targets = await this.find(filter).toArray()
+    const now = new Date().toISOString()
+    await this._wdb.write(async () => {
+      const ops = await Promise.all(
+        targets.map(async (t) => {
+          const record = await this.coll().find(t._id)
+          return record.prepareUpdate((r: any) => {
+            r._raw.data = JSON.stringify({ ...t, deletedAt: now })
+            r._raw.deleted_at = now
+          })
+        })
+      )
+      await this._wdb.batch(...ops)
+    })
+    return { acknowledged: true, deletedCount: targets.length }
+  }
+
+  async countDocuments(filter: MongoFilter = {}): Promise<number> {
+    return this.find(filter).count()
+  }
+
+  async distinct(field: string, filter: MongoFilter = {}): Promise<any[]> {
+    const docs = await this.find(filter).toArray()
+    const seen = new Set<any>()
+    for (const d of docs) {
+      const v = getPath(d, field)
+      if (v !== undefined) seen.add(v)
+    }
+    return Array.from(seen)
+  }
+
+  async hardDeleteOne(filter: MongoFilter) {
+    const target = await this.findOne(filter)
+    if (!target) return { acknowledged: true, deletedCount: 0 }
+    await this._wdb.write(async () => {
+      const record = await this.coll().find(target._id)
+      await record.destroyPermanently()
+    })
+    return { acknowledged: true, deletedCount: 1 }
+  }
+}
