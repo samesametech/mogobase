@@ -7,6 +7,7 @@ A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive 
 - **Offline mode** — same handlers run in the browser against RxDB/IndexedDB (default) or WatermelonDB/LokiJS when the app is offline. Toggle with `<MogobaseProvider online={...} offlineAdapter="rxdb" | "watermelon">`.
 - **One server** — a custom Next.js `server.ts` serves both your app and the mogobase WS endpoint.
 - **MongoDB-native** — thin wrapper around the official driver; no ORM, no schema lock-in.
+- **MCP server** — ships a Model Context Protocol server (`mogobase mcp`) that teaches AI assistants how to scaffold and extend a mogobase project.
 
 ## Install
 
@@ -204,6 +205,65 @@ Prefer `mogobase/runtime` for anything that might run in the browser.
 
 - `mogobase install` — scaffold files into the consuming project. Re-run to update; files are overwritten on conflict.
 - `mogobase dev` — standalone dev server (Hono-based), used when you don't want to run Next.js. Loads handlers from `./mogobase/*.ts`.
+- `mogobase mcp` — starts the bundled MCP server over stdio (see below).
+
+## MCP server
+
+Mogobase ships a [Model Context Protocol](https://modelcontextprotocol.io) server so AI coding assistants (Claude Code, Claude Desktop, Cursor, etc.) can scaffold, inspect, and extend a mogobase project without guessing at conventions.
+
+### Register the server
+
+Run it over stdio with `npx mogobase mcp` from inside the consumer project.
+
+**Claude Code** (from the project root):
+
+```bash
+claude mcp add mogobase -- npx -y mogobase mcp
+```
+
+**Generic MCP client** (`.mcp.json` / `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "mogobase": {
+      "command": "npx",
+      "args": ["-y", "mogobase", "mcp"]
+    }
+  }
+}
+```
+
+The server inherits the client's working directory, so tools that read your project (`mogobase_check_setup`, `mogobase_list_handlers`, …) operate on whichever project the MCP client is attached to.
+
+### Tools
+
+| Tool | Purpose |
+| ---- | ------- |
+| `mogobase_check_setup` | Reports what's wired up vs. missing: project type, `server.ts`, API route, provider mount, handler files, env vars, `package.json` scripts and deps. Call this first. |
+| `mogobase_install` | Runs the same scaffolding as `npx mogobase install`. Overwrites on conflict — call `mogobase_check_setup` first. |
+| `mogobase_list_handlers` | Parses `./mogobase/*.ts` and lists every `query` / `mutation` / `internalQuery` / `internalMutation` with its file and line. |
+| `mogobase_list_models` | Lists every `defineModel(...)` call across the project's handler files. |
+| `mogobase_inspect_handler` | Returns ~30 lines of source around a given handler by name (accepts `internal.*`). |
+
+### Resources
+
+Guides are served as `mogobase://guide/<slug>` (markdown). Clients can read them on demand:
+
+| URI | Description |
+| --- | ----------- |
+| `mogobase://guide/overview` | What mogobase is and the shape of a Next.js setup. |
+| `mogobase://guide/setup` | Step-by-step install and wire-up for a Next.js App Router project. |
+| `mogobase://guide/handlers` | `query`, `mutation`, `internalQuery`, `internalMutation` — args, ctx, conventions. |
+| `mogobase://guide/models` | `defineModel`, zod schemas, indexes, `ObjectId`, `DataLoader`, `buildFilters`. |
+| `mogobase://guide/hooks` | `useQuery`, `useMutation`, `usePaginatedQuery` usage and transport model. |
+| `mogobase://guide/provider` | Wrapping the app, online/offline flag, handlers loader, boot sequence. |
+| `mogobase://guide/offline-backends` | RxDB vs WatermelonDB — when to pick each, caveats, interface. |
+| `mogobase://guide/troubleshooting` | Common errors: WS not connecting, handlers not registering, offline gotchas. |
+
+### Prompts
+
+- `setup-mogobase` — seeds the assistant with the correct onboarding workflow: run `mogobase_check_setup`, read the overview + setup guides, propose changes, ask before running `mogobase_install`.
 
 ## License
 

@@ -7,13 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `mogobase` is a dual-purpose npm package:
 
 1. **A library** consumed by other apps — exports a server runtime (`mogobase/server`), a MongoDB wrapper (`mogobase/db`), and React client hooks (`mogobase`).
-2. **A CLI** (`bin: mogobase`) for the caller app's workflows — `mogobase dev` runs the dev server from the consumer's `node_modules`, and `mogobase install` copies source files (currently React hooks) into the consumer's tree.
+2. **A CLI** (`bin: mogobase`) for the caller app's workflows — `mogobase dev` runs the dev server from the consumer's `node_modules`, `mogobase install` copies source files (currently React hooks) into the consumer's tree, and `mogobase mcp` launches the bundled Model Context Protocol server over stdio so AI assistants can drive scaffolding/inspection.
 
 The build output is published as ESM (`"type": "module"`, `exports` map). Sources use TS path alias `@/*` → `./src/*`; `tsc-alias` rewrites these in `lib/` after `tsc`.
 
 ## Commands
 
-- `npm run build` — clean `lib/` and compile (`tsc && tsc-alias`). Runs automatically via `prepublish`.
+- `npm run build` — clean `lib/` and compile (`tsc && tsc-alias`), then copy `src/mcp/guides/*.md` into `lib/mcp/guides/` (the MCP resource loader reads them from there at runtime). Runs automatically via `prepublish`.
 - `npm run dev` — `wrangler dev` (Cloudflare Workers entrypoint, separate from the Node dev path used by consumers).
 - `npm start` — `node lib/server/start.js` (Node runtime).
 - `npm run cf-typegen` — regenerate `CloudflareBindings` types from `wrangler.jsonc`.
@@ -49,13 +49,26 @@ There are no tests or linters configured. Do not add CI/lint/test tooling withou
 
 ### Dev CLI (`src/dev/`)
 
-- `index.ts` — `bin` entry. Dispatches on first arg: `dev` spawns `npx tsx watch ./node_modules/mogobase/lib/dev/start.js` in the consumer's cwd; `install` calls `install.ts`.
-- `install.ts` — copies three things into the caller's Next.js project:
-  1. Hooks → BFS-finds the shallowest `hooks/` folder (or creates `./hooks/`), skipping `node_modules`/`.git`/`dist`/`build`/`.next`/`.turbo`/`.cache`/`out`/`coverage`.
+- `index.ts` — `bin` entry. Dispatches on first arg: `dev` spawns `npx tsx watch ./node_modules/mogobase/lib/dev/start.js` in the consumer's cwd; `install` calls `install.ts`; `mcp` dynamically imports `../mcp/start.js` to boot the stdio MCP server.
+- `install.ts` — `install(options)` is the callable entrypoint used by both the CLI and the MCP `mogobase_install` tool. Takes `{ cwd?, logger? }` and returns an `InstallSummary` (`created` / `overwritten` / `skipped` / `nextSteps`). Copies three things into the caller's Next.js project:
+  1. Hooks → prefers existing `src/hooks/` or `hooks/`, else creates `src/hooks/` (or `hooks/` if no `src/`). Rewrites relative imports (`../provider`, `../../runtime`) to package imports via `rewriteHookImports`.
   2. API route → installs to `src/app/api/handlers/route.ts` if `src/app/` exists, else `app/api/handlers/route.ts`.
   3. Custom server → `server.ts` at project root.
-  Also creates `./mogobase/` folder for consumer's handler files. On per-file conflict, prompts `o/s/oa/sa` via a shared `Installer` helper.
+  Also creates `./mogobase/` folder for consumer's handler files. Files are **overwritten unconditionally** — no interactive prompting; call `mogobase_check_setup` first (or inspect before running) to avoid clobbering.
 - Path resolution: `resolveMogobaseRoot()` probes `../..` and `../../..` relative to the running module so it works both from `lib/dev/` in a published install and from source during local tests.
+
+### MCP server (`src/mcp/`)
+
+- `start.ts` — boots an `McpServer` from `@modelcontextprotocol/sdk` with `{ resources, tools, prompts }` capabilities and connects it over `StdioServerTransport`. Name/version come from `readPackageVersion()` (reads the installed `mogobase` `package.json`). Entered via `mogobase mcp`.
+- `tools/index.ts` — registers five tools:
+  - `mogobase_install` — thin wrapper around `install()` from `src/dev/install.ts`; captures `logger` lines and returns them alongside the `InstallSummary`.
+  - `mogobase_check_setup` — reports project type, presence of `server.ts` / route handler / `./mogobase/` / `<MogobaseProvider>` mount, `package.json` scripts+deps, and `MONGO_URI` / `MONGO_DB` across `.env*` files. Non-destructive; always call this before `mogobase_install`.
+  - `mogobase_list_handlers` / `mogobase_list_models` — use `parseHandlers.ts` (a regex/AST-light scanner over `./mogobase/*.ts`) to enumerate `query`/`mutation`/`internalQuery`/`internalMutation` calls and `defineModel` calls with file + line.
+  - `mogobase_inspect_handler` — returns ~30 lines of source context around a named handler. Accepts either `name` or `internal.name`.
+- `resources.ts` — registers eight markdown guides at `mogobase://guide/<slug>` (`overview`, `setup`, `handlers`, `models`, `hooks`, `provider`, `offline-backends`, `troubleshooting`). Reads from `lib/mcp/guides/` when installed, falls back to `src/mcp/guides/` during local dev — so the build script must copy `src/mcp/guides/*.md` into `lib/mcp/guides/`.
+- `prompts.ts` — registers one prompt, `setup-mogobase`, that seeds the assistant with the correct onboarding workflow (check setup → read guides → propose + confirm → install).
+- `guides/*.md` — source of truth for the long-form explanations surfaced via MCP resources. Prefer editing these over inlining large blocks of prose into tool descriptions.
+- When adding a new tool, register it from `tools/index.ts` and keep the tool name prefixed with `mogobase_` for easy disambiguation in the MCP client. When adding a new guide, update the `GUIDES` array in `resources.ts` **and** ensure the `.md` file lands in `lib/mcp/guides/` via the build script (no separate `files` entry is needed — the copy step places it inside `lib/`).
 
 ### How a consumer uses this package (Next.js App Router)
 
