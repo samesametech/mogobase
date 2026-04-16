@@ -8,7 +8,7 @@ const version = "1.0.0"
 makeCli({
   version,
   name: "mogobase",
-  usage: "mogobase <dev|install>",
+  usage: "mogobase <dev|install|mcp>",
   arguments: "[command] [options]",
   options: [],
   action: async (command = "dev", options) => {
@@ -27,6 +27,10 @@ makeCli({
         console.error(err instanceof Error ? err.message : err)
         process.exit(1)
       }
+      return
+    }
+    if (command === "mcp") {
+      await import("../mcp/start.js")
       return
     }
     console.error(`Unknown command: ${command}`)

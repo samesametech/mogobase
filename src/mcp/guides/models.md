@@ -1,0 +1,133 @@
+# Models, Schemas, and Indexes
+
+Models are MongoDB collections with optional zod schemas and indexes. Register them with `defineModel(name, schema?, indexes?)` from `mogobase/runtime`.
+
+## Where to call defineModel
+
+Call it at **module scope** in one of your `./mogobase/*.ts` handler files — typically at the top, above the handlers that use the model:
+
+```ts
+import { defineModel, query, mutation, v } from "mogobase/runtime"
+
+defineModel(
+  "todos",
+  v.object({
+    title: v.string(),
+    done: v.boolean(),
+    createdAt: v.number(),
+    userId: v.string().optional(),
+  }),
+  {
+    indexSpecs: [{ key: { userId: 1, createdAt: -1 } }, { key: { done: 1 } }],
+  }
+)
+
+query("listTodos", {
+  args: v.object({}),
+  handler: async (_args, { db, watch }) => {
+    watch("todos")
+    return db.model("todos").find({}).toArray()
+  },
+})
+```
+
+`defineModel` calls are replayed into whatever `db` backend is active:
+
+- **Online**: `MogobaseDB.defineModel(name, schema, indexes)` creates the collection if missing and applies the indexes.
+- **Offline (RxDB)**: `MogobaseClientDB.defineModel(name, schema)` registers an RxDB collection.
+- **Offline (WatermelonDB)**: `MogobaseWatermelonDB.defineModel(name, schema)` registers a WatermelonDB table.
+
+## Schemas are zod v4
+
+The `v` export is `zod/v4`. Schemas are used for:
+
+- Documenting the shape (self-describing).
+- Runtime validation in online mode before writes (via `buildFilters` and adapter helpers).
+- Offline adapter integration (RxDB and WatermelonDB both use the schema).
+
+Typical model schema patterns:
+
+```ts
+defineModel("users", v.object({
+  email: v.string().email(),
+  name: v.string(),
+  createdAt: v.number(),
+}))
+
+defineModel("posts", v.object({
+  authorId: v.string(),
+  title: v.string(),
+  body: v.string(),
+  tags: v.array(v.string()),
+  published: v.boolean(),
+  createdAt: v.number(),
+  updatedAt: v.number().optional(),
+}))
+```
+
+Omit `_id` — MongoDB assigns `ObjectId` by default. If you want a string-keyed model, pass `_id: v.string()` and generate IDs yourself.
+
+## Indexes
+
+Indexes pass through to MongoDB's `createIndexes`:
+
+```ts
+defineModel(
+  "events",
+  v.object({ userId: v.string(), at: v.number(), type: v.string() }),
+  {
+    indexSpecs: [
+      { key: { userId: 1, at: -1 } },
+      { key: { type: 1 } },
+      { key: { at: 1 }, expireAfterSeconds: 60 * 60 * 24 * 30 }, // TTL
+    ],
+    options: { background: true },
+  }
+)
+```
+
+## ObjectId
+
+Import `Id` from `mogobase/db` for server-side ObjectId construction:
+
+```ts
+import { Id } from "mogobase/db"
+// ...
+await db.model("users").findOne({ _id: new Id(someIdString) })
+```
+
+## buildFilters
+
+`buildFilters` (from `mogobase/db`) converts a client-style filter object into a MongoDB filter — handles `$eq`, `$in`, `$gt`, array filters, etc. Useful for pagination / search query handlers.
+
+```ts
+import { buildFilters } from "mogobase/db"
+// ...
+const filter = buildFilters({ authorId: "u1", tags: { $in: ["react"] } })
+await db.model("posts").find(filter).toArray()
+```
+
+## DataLoader batching
+
+For N+1-prone reads (e.g. loading each post's author inside a `listPosts` handler), use `DataLoaderGenerate`:
+
+```ts
+import { DataLoaderGenerate } from "mogobase/db"
+
+const userLoader = DataLoaderGenerate("users") // default key is _id
+
+query("listPostsWithAuthors", {
+  args: v.object({}),
+  handler: async (_args, { db }) => {
+    const posts = await db.model("posts").find({}).toArray()
+    const authors = await Promise.all(posts.map(p => userLoader.load(p.authorId)))
+    return posts.map((p, i) => ({ ...p, author: authors[i] }))
+  },
+})
+```
+
+Create the loader **outside** the handler (module scope) so batching works across requests. Or use a per-request loader if the user scopes matter.
+
+## Offline caveats
+
+If you use the WatermelonDB offline adapter, **all `defineModel` calls must run before the DB is first accessed**. Since handler files are imported once at provider boot (via `handlers={() => import("@/mogobase")}`), and `defineModel` is synchronous at module scope, this is normally automatic — as long as you don't lazy-import handler files elsewhere. See `offline-backends`.
