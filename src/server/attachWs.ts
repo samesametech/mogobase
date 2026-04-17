@@ -101,17 +101,34 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
     })
   })
 
-  server.on("upgrade", (req, socket, head) => {
-    try {
-      const url = new URL(req.url || "/", "http://localhost")
-      if (url.pathname !== path) return
-      wss.handleUpgrade(req, socket as any, head, (ws) => {
-        wss.emit("connection", ws, req)
-      })
-    } catch {
-      socket.destroy()
+  // Intercept `upgrade` via `server.emit` rather than `server.on("upgrade")`.
+  // In Next.js custom-server setups, Next attaches its own upgrade listener
+  // on first request. Both listeners fire for every upgrade, and Next's
+  // handler writes to the already-upgraded socket — corrupting the
+  // WebSocket stream and causing the browser to close with code 1006.
+  // By hooking `emit`, we can short-circuit upgrades on our path so
+  // Next's listener never runs for them.
+  const origEmit = server.emit.bind(server)
+  server.emit = function (event: string, ...args: any[]): boolean {
+    if (event === "upgrade") {
+      const req = args[0] as IncomingMessage
+      const socket = args[1]
+      const head = args[2]
+      try {
+        const url = new URL(req.url || "/", "http://localhost")
+        if (url.pathname === path) {
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            wss.emit("connection", ws, req)
+          })
+          return true
+        }
+      } catch {
+        socket.destroy()
+        return true
+      }
     }
-  })
+    return origEmit(event, ...args)
+  } as any
 
   return wss
 }
