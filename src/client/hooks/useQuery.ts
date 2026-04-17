@@ -14,11 +14,12 @@ function wsUrl(): string {
 
 function useQuery(name: string, args?: any) {
   const { online, ready, clientDB } = useMogobase()
-  const [data, setData] = useState<any>(null)
+  const [data, setData] = useState<any>(undefined)
 
   const argsKey = JSON.stringify(args)
 
   useEffect(() => {
+    setData(undefined)
     if (online) {
       const ws = new WebSocket(wsUrl())
 
@@ -36,7 +37,7 @@ function useQuery(name: string, args?: any) {
 
       return () => {
         ws.close()
-        setData(null)
+        setData(undefined)
       }
     }
 
@@ -55,7 +56,7 @@ function useQuery(name: string, args?: any) {
         watch: (modelName: string) => seen.add(modelName),
       })
       if (cancelled) return
-      setData(rs)
+      setData(rs === undefined ? null : rs)
       for (const m of seen) {
         try {
           const sub = (clientDB as any).observeChanges(m).subscribe(() => {
@@ -73,7 +74,7 @@ function useQuery(name: string, args?: any) {
     return () => {
       cancelled = true
       for (const s of subs) s.unsubscribe()
-      setData(null)
+      setData(undefined)
     }
   }, [online, ready, name, argsKey])
 

@@ -10,7 +10,6 @@ class WebSocket {
   static _instance: WebSocket
 
   _nodeWebSocket?: NodeWebSocket
-  _changeStream?: ChangeStream
   _state: Map<string, any> = new Map()
 
   constructor() {
@@ -18,6 +17,17 @@ class WebSocket {
       WebSocket._instance = this
     }
     return WebSocket._instance
+  }
+
+  async _closeStreams(id: string) {
+    const state = this._state.get(id)
+    const streams: ChangeStream[] = state?.changeStreams || []
+    for (const s of streams) {
+      try {
+        await s.close()
+      } catch {}
+    }
+    if (state) this._state.set(id, { ...state, changeStreams: [] })
   }
 
   async _handleEvent(event: any, socket: any, id: string, headers: any) {
@@ -31,6 +41,7 @@ class WebSocket {
     }
     let rs
     if (type === "query") {
+      await this._closeStreams(id)
       const func = async (noWatch?: boolean) => {
         await DB.connect()
         rs = await handlers._runQuery(name, args, {
@@ -41,21 +52,14 @@ class WebSocket {
               return
             }
             const state = this._state.get(id)
-            const resumeToken = state.changeStream?.resumeToken || undefined
-            if (state.changeStream) {
-              state.changeStream.close()
-            }
             const changeStream = DB.model(modelName).watch(pipeline, {
               ...(options || {}),
               fullDocument: "updateLookup",
-              ...(resumeToken
-                ? {
-                    resumeAfter: resumeToken,
-                  }
-                : {}),
             })
-            this._state.set(id, { ...state, changeStream: changeStream })
-            changeStream.on("change", (change) => {
+            const streams: ChangeStream[] = state?.changeStreams || []
+            streams.push(changeStream)
+            this._state.set(id, { ...state, changeStreams: streams })
+            changeStream.on("change", () => {
               func(true)
             })
           },
@@ -64,6 +68,7 @@ class WebSocket {
       }
       func()
     } else if (type === "paginated-query") {
+      await this._closeStreams(id)
       const func = async (noWatch?: boolean) => {
         await DB.connect()
         rs = await handlers._runQuery(name, args, {
@@ -74,20 +79,13 @@ class WebSocket {
               return
             }
             const state = this._state.get(id)
-            const resumeToken = state.changeStream?.resumeToken || undefined
-            if (state.changeStream) {
-              state.changeStream.close()
-            }
             const changeStream = DB.model(modelName).watch(pipeline, {
               ...(options || {}),
               fullDocument: "updateLookup",
-              ...(resumeToken
-                ? {
-                    resumeAfter: resumeToken,
-                  }
-                : {}),
             })
-            this._state.set(id, { ...state, changeStream: changeStream })
+            const streams: ChangeStream[] = state?.changeStreams || []
+            streams.push(changeStream)
+            this._state.set(id, { ...state, changeStreams: streams })
             changeStream.on("change", (change) => {
               if (change.operationType === "update") {
                 const { fullDocument } = change
@@ -133,11 +131,8 @@ class WebSocket {
           this._handleEvent(event, ws, id, headers)
         },
         onClose: async () => {
-          const state = this._state.get(id)
-          if (state && state.changeStream) {
-            await state.changeStream.close()
-            this._state.delete(id)
-          }
+          await this._closeStreams(id)
+          this._state.delete(id)
         },
       }
     })
