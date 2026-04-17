@@ -8,7 +8,7 @@ import DB from "@/db"
 
 type SocketState = {
   ws: WebSocket
-  changeStream?: ChangeStream
+  changeStreams?: ChangeStream[]
 }
 
 export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws") {
@@ -17,6 +17,17 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
 
   const sendJson = (ws: WebSocket, payload: unknown) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload))
+  }
+
+  const closeStreams = async (id: string) => {
+    const s = state.get(id)
+    const streams = s?.changeStreams || []
+    for (const cs of streams) {
+      try {
+        await cs.close()
+      } catch {}
+    }
+    if (s) state.set(id, { ...s, changeStreams: [] })
   }
 
   async function handleEvent(raw: string, ws: WebSocket, id: string, headers: IncomingMessage["headers"]) {
@@ -31,6 +42,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
 
     if (type === "query" || type === "paginated-query") {
       const resultType = type === "query" ? "QueryResult" : "PaginatedQueryResult"
+      await closeStreams(id)
       const run = async (noWatch?: boolean) => {
         await DB.connect()
         try {
@@ -40,14 +52,13 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
             watch: (modelName: string, pipeline?: Document[], options?: ChangeStreamOptions) => {
               if (noWatch) return
               const s = state.get(id)
-              const resumeToken = s?.changeStream?.resumeToken || undefined
-              if (s?.changeStream) s.changeStream.close()
               const changeStream = DB.model(modelName).watch(pipeline, {
                 ...(options || {}),
                 fullDocument: "updateLookup",
-                ...(resumeToken ? { resumeAfter: resumeToken } : {}),
               })
-              state.set(id, { ...(s || { ws }), changeStream })
+              const streams: ChangeStream[] = s?.changeStreams || []
+              streams.push(changeStream)
+              state.set(id, { ...(s || { ws }), changeStreams: streams })
               changeStream.on("change", (change) => {
                 if (type === "paginated-query" && change.operationType === "update") {
                   sendJson(ws, { type: "UpdateDoc", success: true, data: (change as any).fullDocument })
@@ -85,12 +96,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       handleEvent(buf.toString(), ws, id, req.headers)
     })
     ws.on("close", async () => {
-      const s = state.get(id)
-      if (s?.changeStream) {
-        try {
-          await s.changeStream.close()
-        } catch {}
-      }
+      await closeStreams(id)
       state.delete(id)
     })
   })
