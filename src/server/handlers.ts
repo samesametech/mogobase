@@ -3,11 +3,16 @@ import z4 from "zod/v4"
 import type { MogobaseDB } from "@/db"
 import type { ChangeStreamOptions, Document } from "mongodb"
 
+export type WatchOptions = ChangeStreamOptions & {
+  paginatedField?: string
+  sortAscending?: boolean
+}
+
 export type Context = {
   db?: any
   runQuery?: (name: string, args: any, ctx?: Context) => Promise<any>
   runMutation?: (name: string, args: any, ctx?: Context) => Promise<any>
-  watch?: (modelName: string, pipeline?: Document[], options?: ChangeStreamOptions) => void
+  watch?: (modelName: string, pipelineOrFilter?: Document[] | Document, options?: WatchOptions) => void
   headers?: any
 }
 
@@ -20,7 +25,7 @@ export type QueryHandler = {
       db: MogobaseDB
       runQuery: (name: string, args: any, ctx?: Context) => Promise<any>
       runMutation: (name: string, args: any, ctx?: Context) => Promise<any>
-      watch: (modelName: string, pipeline?: Document[], options?: ChangeStreamOptions) => void
+      watch: (modelName: string, pipelineOrFilter?: Document[] | Document, options?: WatchOptions) => void
     }
   ) => Promise<any>
 }

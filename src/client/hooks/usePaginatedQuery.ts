@@ -26,10 +26,35 @@ const mergeArray = (arr1: any[], arr2: any[], key: string, insert: boolean = fal
   return result
 }
 
+function keyCompare(a: any, b: any): number {
+  if (a == null && b == null) return 0
+  if (a == null) return -1
+  if (b == null) return 1
+  if (a < b) return -1
+  if (a > b) return 1
+  return 0
+}
+
+function insertSorted(arr: any[], doc: any, field: string, sortAscending: boolean) {
+  const key = doc[field]
+  for (let i = 0; i < arr.length; i++) {
+    const existingKey = arr[i][field]
+    const delta = keyCompare(existingKey, key)
+    const shouldInsertHere = sortAscending ? delta > 0 : delta < 0
+    if (shouldInsertHere) {
+      const out = arr.slice()
+      out.splice(i, 0, doc)
+      return out
+    }
+  }
+  return [...arr, doc]
+}
+
 type PaginationData = {
   pageSize: number
   sortAscending?: boolean
   sortCaseInsensitive?: boolean
+  paginatedField?: string
 }
 
 function usePaginatedQuery(
@@ -40,15 +65,17 @@ function usePaginatedQuery(
   const { online, ready, clientDB } = useMogobase()
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState<boolean>(false)
+  const [hasNext, setHasNext] = useState<boolean>(false)
+  const [hasPrevious, setHasPrevious] = useState<boolean>(false)
 
-  const nextPage = useRef<string>("")
-  const previousPage = useRef<string>("")
   const ws = useRef<WebSocket | null>(null)
+  const paginatedField = paginationData.paginatedField ?? "_id"
+  const sortAscending = paginationData.sortAscending ?? true
 
   const argsKey = JSON.stringify(args)
 
   // --- Online (WebSocket) path ---
-  const fetchNextPage = useCallback(() => {
+  const sendInitial = useCallback(() => {
     setLoading(true)
     ws.current?.send(
       JSON.stringify({
@@ -58,33 +85,23 @@ function usePaginatedQuery(
           ...(args || {}),
           paginationArgs: {
             limit: paginationData.pageSize,
-            next: nextPage.current || undefined,
-            sortAscending: paginationData.sortAscending ?? true,
+            sortAscending,
             sortCaseInsensitive: paginationData.sortCaseInsensitive ?? false,
           },
         },
       })
     )
-  }, [name, argsKey, paginationData])
+  }, [name, argsKey, paginationData.pageSize, sortAscending, paginationData.sortCaseInsensitive])
 
-  const fetchPreviousPage = useCallback(() => {
+  const sendLoadNext = useCallback(() => {
     setLoading(true)
-    ws.current?.send(
-      JSON.stringify({
-        type: "paginated-query",
-        name,
-        args: {
-          ...(args || {}),
-          paginationArgs: {
-            limit: paginationData.pageSize,
-            previous: previousPage.current || undefined,
-            sortAscending: paginationData.sortAscending ?? true,
-            sortCaseInsensitive: paginationData.sortCaseInsensitive ?? false,
-          },
-        },
-      })
-    )
-  }, [name, argsKey, paginationData])
+    ws.current?.send(JSON.stringify({ type: "paginated-query-load-next" }))
+  }, [])
+
+  const sendLoadPrevious = useCallback(() => {
+    setLoading(true)
+    ws.current?.send(JSON.stringify({ type: "paginated-query-load-previous" }))
+  }, [])
 
   // --- Offline path state ---
   const offlineNextRef = useRef<string>("")
@@ -96,31 +113,56 @@ function usePaginatedQuery(
       ws.current = new WebSocket(wsUrl())
 
       ws.current.addEventListener("open", () => {
-        fetchNextPage()
+        sendInitial()
       })
 
       ws.current.addEventListener("message", (event) => {
-        setLoading(false)
         const rs = JSON.parse(event.data)
         if (rs.type === "PaginatedQueryResult") {
+          setLoading(false)
           if (rs.success) {
-            const { results, previous, hasPrevious, next, hasNext } = rs.data
-            nextPage.current = hasNext ? next : ""
-            previousPage.current = hasPrevious ? previous : ""
-            setData((d) => mergeArray(d, results, "_id", true))
+            const { results, hasPrevious: hp, hasNext: hn } = rs.data
+            setHasNext(!!hn)
+            setHasPrevious(!!hp)
+            setData(results || [])
+          } else {
+            console.error(rs.error)
+          }
+        } else if (rs.type === "PaginatedQueryPage") {
+          setLoading(false)
+          if (rs.success) {
+            const { results, hasPrevious: hp, hasNext: hn } = rs.data
+            if (rs.direction === "next") {
+              setHasNext(!!hn)
+              setData((d) => mergeArray(d, results, "_id", true))
+            } else {
+              setHasPrevious(!!hp)
+              setData((d) => {
+                const existingIds = new Set(d.map((x) => x._id))
+                const prepend = (results || []).filter((x: any) => !existingIds.has(x._id))
+                return [...prepend, ...d]
+              })
+            }
           } else {
             console.error(rs.error)
           }
         } else if (rs.type === "UpdateDoc") {
           setData((d) => mergeArray(d, [rs.data], "_id"))
+        } else if (rs.type === "AddDoc") {
+          setData((d) => {
+            if (d.some((x) => x._id === rs.data._id)) return d
+            return insertSorted(d, rs.data, paginatedField, sortAscending)
+          })
+        } else if (rs.type === "RemoveDoc") {
+          setData((d) => d.filter((item) => item._id !== rs.data?._id))
         }
       })
 
       return () => {
         ws.current?.close()
-        nextPage.current = ""
-        previousPage.current = ""
         setData([])
+        setHasNext(false)
+        setHasPrevious(false)
         setLoading(false)
       }
     }
@@ -137,11 +179,12 @@ function usePaginatedQuery(
       const seen = new Set<string>()
       const paginationArgs: any = {
         limit: paginationData.pageSize,
-        sortAscending: paginationData.sortAscending ?? true,
+        sortAscending,
         sortCaseInsensitive: paginationData.sortCaseInsensitive ?? false,
       }
       if (direction === "next" && offlineNextRef.current) paginationArgs.next = offlineNextRef.current
-      if (direction === "previous" && offlinePrevRef.current) paginationArgs.previous = offlinePrevRef.current
+      if (direction === "previous" && offlinePrevRef.current)
+        paginationArgs.previous = offlinePrevRef.current
 
       try {
         const rs = await runQuery(
@@ -151,11 +194,11 @@ function usePaginatedQuery(
         )
         if (cancelled) return
         if (rs && Array.isArray(rs.results)) {
-          const { results, previous, hasPrevious, next, hasNext } = rs
-          offlineNextRef.current = hasNext ? next : ""
-          offlinePrevRef.current = hasPrevious ? previous : ""
-          nextPage.current = offlineNextRef.current
-          previousPage.current = offlinePrevRef.current
+          const { results, previous, hasPrevious: hp, next, hasNext: hn } = rs
+          offlineNextRef.current = hn ? next : ""
+          offlinePrevRef.current = hp ? previous : ""
+          setHasNext(!!hn)
+          setHasPrevious(!!hp)
           setData((d) => (direction ? mergeArray(d, results, "_id", true) : results))
         }
       } catch (err) {
@@ -184,34 +227,34 @@ function usePaginatedQuery(
       offlineRunRef.current = null
       offlineNextRef.current = ""
       offlinePrevRef.current = ""
-      nextPage.current = ""
-      previousPage.current = ""
       setData([])
+      setHasNext(false)
+      setHasPrevious(false)
       setLoading(false)
     }
-  }, [online, ready, name, argsKey, paginationData.pageSize, fetchNextPage])
+  }, [online, ready, name, argsKey, paginationData.pageSize, sendInitial])
 
   const loadNext = useCallback(() => {
     if (!online) {
       if (offlineNextRef.current) offlineRunRef.current?.("next")
       return
     }
-    if (nextPage.current) fetchNextPage()
-  }, [online, fetchNextPage])
+    if (hasNext) sendLoadNext()
+  }, [online, hasNext, sendLoadNext])
 
   const loadPrevious = useCallback(() => {
     if (!online) {
       if (offlinePrevRef.current) offlineRunRef.current?.("previous")
       return
     }
-    if (previousPage.current) fetchPreviousPage()
-  }, [online, fetchPreviousPage])
+    if (hasPrevious) sendLoadPrevious()
+  }, [online, hasPrevious, sendLoadPrevious])
 
   return {
     results: data,
-    hasNext: !!nextPage.current,
+    hasNext,
     loadNext,
-    hasPrevious: !!previousPage.current,
+    hasPrevious,
     loadPrevious,
     isLoading: loading,
   }

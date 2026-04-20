@@ -5,10 +5,73 @@ import { ChangeStream, ChangeStreamOptions, Document } from "mongodb"
 
 import handlers from "./handlers"
 import DB from "@/db"
+import { matchFilter } from "./matchFilter"
+
+type PaginatedSub = {
+  name: string
+  baseArgs: any
+  limit: number
+  sortAscending: boolean
+  sortCaseInsensitive: boolean
+  filter?: Document
+  paginatedField: string
+  // Map<docIdStr, paginatedFieldValue>
+  ids: Map<string, any>
+  hasPrevious: boolean
+  hasNext: boolean
+  nextCursor?: string
+  previousCursor?: string
+  changeStream?: ChangeStream
+}
 
 type SocketState = {
   ws: WebSocket
   changeStreams?: ChangeStream[]
+  paginated?: PaginatedSub
+}
+
+function keyStr(v: any): string {
+  if (v == null) return ""
+  if (typeof v === "object" && typeof (v as any).toHexString === "function") {
+    return (v as any).toHexString()
+  }
+  if (v instanceof Date) return v.toISOString()
+  return String(v)
+}
+
+function cmp(a: any, b: any): number {
+  const sa = keyStr(a)
+  const sb = keyStr(b)
+  if (sa < sb) return -1
+  if (sa > sb) return 1
+  return 0
+}
+
+function windowExtremes(sub: PaginatedSub): { min?: any; max?: any } {
+  let min: any, max: any
+  for (const k of sub.ids.values()) {
+    if (min === undefined || cmp(k, min) < 0) min = k
+    if (max === undefined || cmp(k, max) > 0) max = k
+  }
+  return { min, max }
+}
+
+function boundOpenness(sub: PaginatedSub) {
+  const asc = sub.sortAscending
+  const lowerOpen = asc ? !sub.hasPrevious : !sub.hasNext
+  const upperOpen = asc ? !sub.hasNext : !sub.hasPrevious
+  return { lowerOpen, upperOpen }
+}
+
+function keyInWindow(sub: PaginatedSub, key: any): boolean {
+  const { min, max } = windowExtremes(sub)
+  const { lowerOpen, upperOpen } = boundOpenness(sub)
+  if (min === undefined || max === undefined) {
+    return lowerOpen && upperOpen
+  }
+  const aboveMin = cmp(key, min) >= 0
+  const belowMax = cmp(key, max) <= 0
+  return (aboveMin || lowerOpen) && (belowMax || upperOpen)
 }
 
 export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws") {
@@ -30,6 +93,209 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
     if (s) state.set(id, { ...s, changeStreams: [] })
   }
 
+  const closePaginatedSub = async (id: string) => {
+    const s = state.get(id)
+    const cs = s?.paginated?.changeStream
+    if (cs) {
+      try {
+        await cs.close()
+      } catch {}
+    }
+    if (s) state.set(id, { ...s, paginated: undefined })
+  }
+
+  function handleChange(sub: PaginatedSub, change: any, ws: WebSocket) {
+    if (!sub.filter) return
+    const op = change.operationType
+    const after = (change as any).fullDocument
+    const before = (change as any).fullDocumentBeforeChange
+    const docKey = (change as any).documentKey
+    const docId = docKey?._id
+    const docIdStr = keyStr(docId)
+
+    if (op === "insert") {
+      if (!after) return
+      const key = after[sub.paginatedField]
+      if (matchFilter(after, sub.filter) && keyInWindow(sub, key)) {
+        sub.ids.set(docIdStr, key)
+        sendJson(ws, { type: "AddDoc", success: true, data: after })
+      }
+      return
+    }
+
+    if (op === "update" || op === "replace") {
+      const afterKey = after ? after[sub.paginatedField] : undefined
+      const beforeKey = before ? before[sub.paginatedField] : undefined
+      const afterVisible = after
+        ? matchFilter(after, sub.filter) && keyInWindow(sub, afterKey)
+        : false
+      // Fallback when pre-image unavailable: was it tracked in window?
+      const beforeVisible = before
+        ? matchFilter(before, sub.filter) && keyInWindow(sub, beforeKey)
+        : sub.ids.has(docIdStr)
+
+      if (beforeVisible && afterVisible) {
+        sub.ids.set(docIdStr, afterKey)
+        sendJson(ws, { type: "UpdateDoc", success: true, data: after })
+      } else if (!beforeVisible && afterVisible) {
+        sub.ids.set(docIdStr, afterKey)
+        sendJson(ws, { type: "AddDoc", success: true, data: after })
+      } else if (beforeVisible && !afterVisible) {
+        sub.ids.delete(docIdStr)
+        sendJson(ws, { type: "RemoveDoc", success: true, data: before ?? { _id: docId } })
+      }
+      return
+    }
+
+    if (op === "delete") {
+      if (before) {
+        const beforeKey = before[sub.paginatedField]
+        const beforeVisible = matchFilter(before, sub.filter) && keyInWindow(sub, beforeKey)
+        if (beforeVisible) {
+          sub.ids.delete(docIdStr)
+          sendJson(ws, { type: "RemoveDoc", success: true, data: before })
+        }
+      } else if (sub.ids.has(docIdStr)) {
+        sub.ids.delete(docIdStr)
+        sendJson(ws, { type: "RemoveDoc", success: true, data: { _id: docId } })
+      }
+    }
+  }
+
+  async function runPaginatedInitial(
+    id: string,
+    ws: WebSocket,
+    headers: IncomingMessage["headers"],
+    name: string,
+    args: any
+  ) {
+    await closePaginatedSub(id)
+    await DB.connect()
+
+    const paginationArgs = args?.paginationArgs || {}
+    const baseArgs = { ...(args || {}) }
+    delete baseArgs.paginationArgs
+
+    const sub: PaginatedSub = {
+      name,
+      baseArgs,
+      limit: paginationArgs.limit ?? 10,
+      sortAscending: paginationArgs.sortAscending ?? true,
+      sortCaseInsensitive: paginationArgs.sortCaseInsensitive ?? false,
+      paginatedField: "_id",
+      ids: new Map(),
+      hasPrevious: false,
+      hasNext: false,
+    }
+
+    try {
+      const rs = await handlers._runQuery(name, args, {
+        headers,
+        db: DB,
+        watch: (modelName: string, pipelineOrFilter?: Document[] | Document, options?: any) => {
+          const isArrayPipeline = Array.isArray(pipelineOrFilter)
+          const filter =
+            !isArrayPipeline && pipelineOrFilter && typeof pipelineOrFilter === "object"
+              ? (pipelineOrFilter as Document)
+              : undefined
+          sub.filter = filter
+          if (options?.paginatedField) sub.paginatedField = options.paginatedField
+          if (typeof options?.sortAscending === "boolean") sub.sortAscending = options.sortAscending
+          if (sub.changeStream) return
+          const cs = DB.model(modelName).watch(undefined, {
+            fullDocument: "updateLookup",
+            fullDocumentBeforeChange: "whenAvailable",
+          } as ChangeStreamOptions)
+          sub.changeStream = cs
+          cs.on("change", (change) => handleChange(sub, change, ws))
+        },
+      })
+
+      if (!rs?.results) {
+        throw new Error("Invalid paginated result. Return value must come from MongoPaging.find")
+      }
+
+      for (const doc of rs.results) {
+        sub.ids.set(keyStr(doc._id), doc[sub.paginatedField])
+      }
+      sub.hasPrevious = !!rs.hasPrevious
+      sub.hasNext = !!rs.hasNext
+      sub.nextCursor = rs.hasNext ? rs.next : undefined
+      sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
+
+      const existing = state.get(id) || { ws }
+      state.set(id, { ...existing, paginated: sub })
+
+      sendJson(ws, { type: "PaginatedQueryResult", success: true, data: rs })
+    } catch (error: any) {
+      sendJson(ws, { type: "PaginatedQueryResult", success: false, error: `${error?.message || error}` })
+    }
+  }
+
+  async function runPaginatedLoadMore(
+    id: string,
+    ws: WebSocket,
+    headers: IncomingMessage["headers"],
+    direction: "next" | "previous"
+  ) {
+    const s = state.get(id)
+    const sub = s?.paginated
+    if (!sub) {
+      return sendJson(ws, {
+        type: "PaginatedQueryPage",
+        success: false,
+        direction,
+        error: "No active paginated subscription",
+      })
+    }
+    const cursor = direction === "next" ? sub.nextCursor : sub.previousCursor
+    if (!cursor) {
+      return sendJson(ws, {
+        type: "PaginatedQueryPage",
+        success: true,
+        direction,
+        data: { results: [], hasPrevious: sub.hasPrevious, hasNext: sub.hasNext },
+      })
+    }
+
+    const paginationArgs: any = {
+      limit: sub.limit,
+      sortAscending: sub.sortAscending,
+      sortCaseInsensitive: sub.sortCaseInsensitive,
+    }
+    if (direction === "next") paginationArgs.next = cursor
+    else paginationArgs.previous = cursor
+    const callArgs = { ...sub.baseArgs, paginationArgs }
+
+    try {
+      await DB.connect()
+      const rs = await handlers._runQuery(sub.name, callArgs, {
+        headers,
+        db: DB,
+        watch: () => {},
+      })
+      if (!rs?.results) throw new Error("Invalid paginated result")
+      for (const doc of rs.results) {
+        sub.ids.set(keyStr(doc._id), doc[sub.paginatedField])
+      }
+      if (direction === "next") {
+        sub.hasNext = !!rs.hasNext
+        sub.nextCursor = rs.hasNext ? rs.next : undefined
+      } else {
+        sub.hasPrevious = !!rs.hasPrevious
+        sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
+      }
+      sendJson(ws, { type: "PaginatedQueryPage", success: true, direction, data: rs })
+    } catch (error: any) {
+      sendJson(ws, {
+        type: "PaginatedQueryPage",
+        success: false,
+        direction,
+        error: `${error?.message || error}`,
+      })
+    }
+  }
+
   async function handleEvent(raw: string, ws: WebSocket, id: string, headers: IncomingMessage["headers"]) {
     let data: any
     try {
@@ -38,10 +304,19 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       return sendJson(ws, { success: false, error: "Invalid JSON" })
     }
     const { type, name, args } = data
+
+    if (type === "paginated-query-load-next" || type === "paginated-query-load-previous") {
+      return runPaginatedLoadMore(
+        id,
+        ws,
+        headers,
+        type === "paginated-query-load-next" ? "next" : "previous"
+      )
+    }
+
     if (!name) return sendJson(ws, { success: false, error: "Name is required" })
 
-    if (type === "query" || type === "paginated-query") {
-      const resultType = type === "query" ? "QueryResult" : "PaginatedQueryResult"
+    if (type === "query") {
       await closeStreams(id)
       const run = async (noWatch?: boolean) => {
         await DB.connect()
@@ -49,33 +324,32 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
           const rs = await handlers._runQuery(name, args, {
             headers,
             db: DB,
-            watch: (modelName: string, pipeline?: Document[], options?: ChangeStreamOptions) => {
+            watch: (modelName: string, pipelineOrFilter?: Document[] | Document, options?: any) => {
               if (noWatch) return
+              const isArrayPipeline = Array.isArray(pipelineOrFilter)
+              const pipeline = isArrayPipeline ? (pipelineOrFilter as Document[]) : undefined
               const s = state.get(id)
               const changeStream = DB.model(modelName).watch(pipeline, {
                 ...(options || {}),
                 fullDocument: "updateLookup",
-              })
+                fullDocumentBeforeChange: "whenAvailable",
+              } as ChangeStreamOptions)
               const streams: ChangeStream[] = s?.changeStreams || []
               streams.push(changeStream)
               state.set(id, { ...(s || { ws }), changeStreams: streams })
-              changeStream.on("change", (change) => {
-                if (type === "paginated-query" && change.operationType === "update") {
-                  sendJson(ws, { type: "UpdateDoc", success: true, data: (change as any).fullDocument })
-                }
+              changeStream.on("change", () => {
                 run(true)
               })
             },
           })
-          if (type === "paginated-query" && !rs?.results) {
-            throw new Error("Invalid paginated result. Return value must come from MongoPaging.find")
-          }
-          sendJson(ws, { type: resultType, success: true, data: rs })
+          sendJson(ws, { type: "QueryResult", success: true, data: rs })
         } catch (error: any) {
-          sendJson(ws, { type: resultType, success: false, error: `${error?.message || error}` })
+          sendJson(ws, { type: "QueryResult", success: false, error: `${error?.message || error}` })
         }
       }
       run()
+    } else if (type === "paginated-query") {
+      await runPaginatedInitial(id, ws, headers, name, args)
     } else if (type === "mutation") {
       await DB.connect()
       try {
@@ -97,6 +371,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
     })
     ws.on("close", async () => {
       await closeStreams(id)
+      await closePaginatedSub(id)
       state.delete(id)
     })
   })
