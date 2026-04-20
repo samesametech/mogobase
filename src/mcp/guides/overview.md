@@ -6,8 +6,8 @@ Mogobase is a Next.js-focused backend layer that combines MongoDB persistence, a
 
 - **Handlers**: `query()` / `mutation()` / `internalQuery()` / `internalMutation()` registered at module scope in `./mogobase/*.ts`. Zod v4 args, typed context with `db`, `runQuery`, `runMutation`, `headers`, and `watch` (queries only).
 - **MongoDB wrapper**: `MogobaseDB` singleton with `defineModel(name, schema?, indexes?)`, `Id` (`ObjectId`), `buildFilters`, and `DataLoaderGenerate` for batched reads.
-- **Live queries over WebSocket**: `attachMogobaseWebSocket(httpServer)` in the custom `server.ts`. The client `useQuery` / `usePaginatedQuery` hooks subscribe over `/ws` and get pushed `UpdateDoc` frames.
-- **Offline mode**: wrap the app in `<MogobaseProvider online={false}>`. Hooks run handlers directly against a local store and re-run on change events. Two interchangeable backends: `rxdb` (default) or `watermelon`.
+- **Live queries over WebSocket**: `attachMogobaseWebSocket(httpServer)` in the custom `server.ts`. `useQuery` re-runs its handler on every matching change-stream event; `usePaginatedQuery` maintains a **window-scoped subscription** and applies incremental `AddDoc` / `UpdateDoc` / `RemoveDoc` diffs — so loaded pages stay live without re-fetching.
+- **Offline mode**: wrap the app in `<MogobaseProvider online={false}>`. Hooks run handlers directly against a local store and re-run on change events. Two interchangeable backends: `rxdb` (default) or `watermelon`. Both propagate writes across same-origin tabs — RxDB via its built-in BroadcastChannel, WatermelonDB via a `BroadcastChannel("mogobase-watermelon-<dbName>")` shim provided by mogobase.
 - **CLI**: `mogobase install` scaffolds the consumer's Next.js project; `mogobase mcp` runs this MCP server; `mogobase dev` runs a standalone Hono server (legacy, not needed for the Next.js path).
 
 ## The Next.js setup at a glance

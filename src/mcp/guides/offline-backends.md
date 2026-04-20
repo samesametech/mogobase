@@ -11,6 +11,7 @@ Which to pick:
 | React Native | Possible (not tested) | ✅ Battle-tested |
 | Query DSL | Mongo-style filters natively | Mongo-style filters (evaluated in JS) |
 | Reactive observation | Native `collection.$` | Wraps `withChangesForTables`, skips replay-on-subscribe |
+| Cross-tab sync | Native (RxDB BroadcastChannel plugin) | `BroadcastChannel("mogobase-watermelon-<dbName>")` shim (provided by mogobase) |
 | Bundle size | Larger | Smaller per table |
 | Writes | Per-document | Per-record, batched-capable |
 
@@ -46,6 +47,20 @@ The backend is lazy-imported — only the selected one ships to the browser.
 - `observeChanges(name)` wraps `Database.withChangesForTables([name])` and **skips the replay-on-subscribe emission** so `useQuery` doesn't loop on mount.
 - **All `defineModel` calls must run before the DB is first accessed.** `defineModel` throws if called after `_ensureDb()` for an unknown model. It's idempotent for already-registered models (safe under strict-mode).
 - Practical implication: register all models in `./mogobase/*.ts` at module scope (the normal pattern) and you're fine. Do not lazy-add models after the first `useQuery`.
+
+## Cross-tab sync
+
+Both backends propagate writes to open tabs of the same origin so a write in tab A shows up in tab B without a refresh.
+
+- **RxDB**: built-in — RxDB internally coordinates via `BroadcastChannel` across tabs.
+- **WatermelonDB**: each tab runs its own in-memory LokiJS instance. Loki persists to IncrementalIndexedDB, but doesn't watch IndexedDB for peer changes. To fix this, mogobase's `MogobaseWatermelonDB` opens a `BroadcastChannel("mogobase-watermelon-<dbName>")` and broadcasts every mutation as `{ op: "upsert", doc }` or `{ op: "hardDelete", id }`. Receiving tabs apply the message through `_applyUpsert` / `_applyHardDelete` on the target collection's adapter — those helpers bypass the soft-delete filter so a record soft-deleted on the peer updates `deleted_at` locally. A `_applyingRemote` flag suppresses re-broadcast in the receiver so mutations don't ping-pong. The Watermelon write still fires `withChangesForTables([name])` naturally, which drives `observeChanges(name)` subscribers in the receiving tab.
+
+Caveats:
+
+- Browser only. `BroadcastChannel` is not available in React Native.
+- No conflict resolution — last-writer-wins by message order. If two tabs race on the same record with different values, the later message wins. Keep mutations small and field-targeted to reduce surface area.
+- Messages carry the full post-mutation record so the receiver never needs to re-read; deletions (soft or hard) carry either the updated doc with `deletedAt` set or the id.
+- A tab opened after a peer tab already mutated will read the current state from IndexedDB on boot (no replay needed).
 
 ## Writes go through the online handler, reads go local
 

@@ -59,6 +59,18 @@ The custom server is meant to be run at the project root via `tsx`. If you moved
 
 `mogobase` declares `@nozbe/watermelondb` as an optional peer dep. If you're using the RxDB backend, ignore the warning. If you picked WatermelonDB, `yarn add @nozbe/watermelondb`.
 
+## Paginated query: doc changes aren't pushed
+
+`usePaginatedQuery` relies on the handler calling `ctx.watch(modelName, filter, { paginatedField, sortAscending })`. Without the filter + options, the server can't decide whether a change-stream event belongs to the loaded window, so diffs are dropped. Pass the **same filter** you pass to `MongoPaging.find`, and pass `paginatedField` / `sortAscending` from `args.paginationArgs`.
+
+## Paginated query: only `_id` sort works
+
+The server's window-matching is keyed on `paginatedField`. If your handler sorts/cursors on a different field, you must pass `{ paginatedField: "createdAt" }` (or whatever) to `ctx.watch` — otherwise the server tracks `_id` values which won't match the page boundaries.
+
+## Offline: tab B doesn't see writes from tab A
+
+Both tabs must be using the same `dbName` on the `MogobaseProvider`. If different names are in play, the BroadcastChannel topic (`mogobase-watermelon-<dbName>` or the RxDB equivalent) is different and messages aren't shared. Also confirm you're not in a context where `BroadcastChannel` is unavailable (older browsers, some WebView embeddings).
+
 ## Changing hooks doesn't take effect
 
 Hooks are copied into `@/hooks` as templates. Edit them directly in your project — changes in `node_modules/mogobase/src/client/hooks` don't propagate.

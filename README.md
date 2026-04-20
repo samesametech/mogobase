@@ -3,8 +3,8 @@
 A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive queries over WebSockets, Convex-style typed handlers, and **offline support** via RxDB or WatermelonDB.
 
 - **Typed handlers** — define `query()` / `mutation()` with zod-validated args.
-- **Reactive queries** — `useQuery` / `usePaginatedQuery` hooks subscribe via WebSocket and re-run on MongoDB change streams.
-- **Offline mode** — same handlers run in the browser against RxDB/IndexedDB (default) or WatermelonDB/LokiJS when the app is offline. Toggle with `<MogobaseProvider online={...} offlineAdapter="rxdb" | "watermelon">`.
+- **Reactive queries** — `useQuery` re-runs its handler on MongoDB change stream events; `usePaginatedQuery` maintains a window-scoped subscription and pushes per-doc `AddDoc` / `UpdateDoc` / `RemoveDoc` diffs so loaded pages stay live without re-fetching.
+- **Offline mode** — same handlers run in the browser against RxDB/IndexedDB (default) or WatermelonDB/LokiJS when the app is offline. Toggle with `<MogobaseProvider online={...} offlineAdapter="rxdb" | "watermelon">`. Both backends sync writes across same-origin tabs via BroadcastChannel.
 - **One server** — a custom Next.js `server.ts` serves both your app and the mogobase WS endpoint.
 - **MongoDB-native** — thin wrapper around the official driver; no ORM, no schema lock-in.
 - **MCP server** — ships a Model Context Protocol server (`mogobase mcp`) that teaches AI assistants how to scaffold and extend a mogobase project.
@@ -93,7 +93,7 @@ Handler `ctx` provides:
 - `ctx.db` — the database (MongoDB server-side, RxDB offline). `ctx.db.model(name)` returns a collection-like object with `find`, `insertOne`, `updateOne`, etc.
 - `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` — call other handlers, including `internal.*`
 - `ctx.headers` — request headers (useful for auth; online only)
-- `ctx.watch(collectionName)` — **queries only**; subscribes the client to change-stream updates on that collection
+- `ctx.watch(modelName, filterOrPipeline?, options?)` — **queries only**. Subscribes the client to change-stream updates on that collection. For `useQuery` it triggers a re-run on every matching event. For `usePaginatedQuery`, pass the same filter you query with plus `{ paginatedField, sortAscending }` so the server can decide whether a changed doc belongs to the loaded window.
 
 Use `internalQuery()` / `internalMutation()` for handlers that should only be callable from server code (stored under the `internal.` prefix).
 

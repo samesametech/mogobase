@@ -37,7 +37,26 @@ The second parameter of every handler is `ctx` with these fields:
 | `runQuery(name, args)` | queries + mutations | Call another query handler. Internal names must be prefixed: `runQuery("internal.foo", args)`. |
 | `runMutation(name, args)` | queries + mutations | Call another mutation handler. |
 | `headers` | queries + mutations | Incoming request headers (from the HTTP POST or the WebSocket upgrade). Use for auth. |
-| `watch(modelName, pipeline?, options?)` | **queries only** | Opt into live-query semantics. When called, the server keeps a MongoDB change stream open and pushes updates on the open WebSocket to this query subscription. |
+| `watch(modelName, filterOrPipeline?, options?)` | **queries only** | Opt into live-query semantics. When called, the server keeps a MongoDB change stream open and pushes updates on the open WebSocket to this query subscription. For `useQuery` it triggers a re-run; for `usePaginatedQuery` the second arg is the filter used to decide whether a changed doc belongs to the loaded window. |
+
+### `ctx.watch` second arg: filter vs pipeline
+
+- **Plain object** → interpreted as a Mongo filter. Used by `usePaginatedQuery` as the matcher for incoming change-stream events: the server only sends `AddDoc` / `UpdateDoc` / `RemoveDoc` for docs that pass this filter.
+- **Array** → interpreted as an aggregation pipeline passed through to `collection.watch(pipeline)`. Use this when you need server-side pre-filtering of the change stream.
+- **Omitted** → unfiltered watch.
+
+### `ctx.watch` options (paginated queries)
+
+```ts
+ctx.watch("posts", { authorId }, { paginatedField: "createdAt", sortAscending: false })
+```
+
+| Option | Default | Purpose |
+|---|---|---|
+| `paginatedField` | `"_id"` | The field the handler sorts/cursors on. The server uses it to decide if a doc's key falls inside the loaded window. |
+| `sortAscending` | `true` | Sort direction. Combined with `hasPrevious` / `hasNext` to determine which side of the window is open. |
+
+Any other keys are forwarded to `collection.watch(undefined, options)` as `ChangeStreamOptions` (e.g., `startAfter`).
 
 ## Queries
 
@@ -99,20 +118,36 @@ mutation("publishPost", {
 
 ## Paginated queries
 
-Use the exported `PaginationQueryArgs` helper for cursor-based args — pairs with `usePaginatedQuery` on the client.
+Use the exported `PaginationQueryArgs` helper for cursor-based args — pairs with `usePaginatedQuery` on the client. The return shape must match `{ results, hasNext, hasPrevious, next, previous }` (the contract of `mongo-cursor-pagination`).
 
 ```ts
 import { query, v, PaginationQueryArgs } from "mogobase/runtime"
+import MongoPaging from "mongo-cursor-pagination"
 
 query("listPosts", {
   args: PaginationQueryArgs.extend({ authorId: v.string().optional() }),
   handler: async (args, { db, watch }) => {
-    watch("posts")
-    // implement cursor logic using args.limit / args.next / args.previous
-    // ... (return { data, next, previous } matching the hook's expected shape)
+    const filter: any = {}
+    if (args.authorId) filter.authorId = args.authorId
+
+    // The filter + options here are used ONLY by the WebSocket subscription
+    // to decide if incoming change-stream events belong to the loaded window.
+    // The actual Mongo query still happens below via MongoPaging.find.
+    watch("posts", filter, { paginatedField: "_id", sortAscending: args.paginationArgs.sortAscending })
+
+    return await MongoPaging.find(db.model("posts").collection, {
+      query: filter,
+      paginatedField: "_id",
+      limit: args.paginationArgs.limit,
+      sortAscending: args.paginationArgs.sortAscending,
+      next: args.paginationArgs.next,
+      previous: args.paginationArgs.previous,
+    })
   },
 })
 ```
+
+The server then emits incremental `AddDoc` / `UpdateDoc` / `RemoveDoc` frames per change-stream event that matches both the filter and the loaded window. See the `hooks` guide for the wire protocol.
 
 ## Naming conventions
 
