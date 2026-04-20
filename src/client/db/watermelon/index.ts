@@ -6,6 +6,14 @@
 //   id (PK, mirrors _id), data (JSON blob of the full record), deleted_at.
 // Mongo-style filters are evaluated in JS on the decoded blob (see ./filters),
 // so consumer handler code written against mongodb works unchanged.
+//
+// Cross-tab reactivity: each tab has its own Loki in-memory state, so a write
+// in tab A would otherwise be invisible to tab B until a page refresh (unlike
+// RxDB which uses BroadcastChannel internally). This module broadcasts every
+// mutation over a `BroadcastChannel` and applies incoming messages through a
+// dedicated path that writes to the local Loki but skips re-broadcasting — the
+// resulting Watermelon write triggers `withChangesForTables` in the receiving
+// tab naturally, so `observeChanges` fires for its subscribers.
 
 import { Database } from "@nozbe/watermelondb"
 import Model from "@nozbe/watermelondb/Model"
@@ -16,6 +24,10 @@ import type { IndexDescription, CreateIndexesOptions } from "mongodb"
 import { WatermelonMongoAdapter } from "./adapter"
 
 type ModelDef = { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions } }
+
+export type CrossTabMsg =
+  | { table: string; op: "upsert"; doc: any }
+  | { table: string; op: "hardDelete"; id: string }
 
 const CDB_GLOBAL_KEY = "__mogobase_watermelon_db__"
 const cdbGlobal = globalThis as unknown as Record<string, { instance?: MogobaseWatermelonDB }>
@@ -42,6 +54,8 @@ export class MogobaseWatermelonDB {
   _pending!: Map<string, ModelDef>
   _adapters!: Map<string, WatermelonMongoAdapter>
   _dbName: string = "mogobase"
+  _bc?: BroadcastChannel
+  _applyingRemote = false
 
   constructor() {
     return MogobaseWatermelonDB._instance
@@ -90,10 +104,39 @@ export class MogobaseWatermelonDB {
       dbName: this._dbName,
     })
     this._wdb = new Database({ adapter, modelClasses: modelClasses as any })
+    const broadcast = (msg: CrossTabMsg) => this._broadcast(msg)
     for (const name of this._pending.keys()) {
-      this._adapters.set(name, new WatermelonMongoAdapter(this._wdb, name))
+      this._adapters.set(name, new WatermelonMongoAdapter(this._wdb, name, broadcast))
     }
+    this._setupCrossTabSync()
     return this._wdb
+  }
+
+  private _setupCrossTabSync() {
+    if (typeof BroadcastChannel === "undefined") return
+    this._bc = new BroadcastChannel(`mogobase-watermelon-${this._dbName}`)
+    this._bc.onmessage = async (ev: MessageEvent<CrossTabMsg>) => {
+      const msg = ev.data
+      const adapter = this._adapters.get(msg.table)
+      if (!adapter) return
+      this._applyingRemote = true
+      try {
+        if (msg.op === "upsert") {
+          await adapter._applyUpsert(msg.doc)
+        } else if (msg.op === "hardDelete") {
+          await adapter._applyHardDelete(msg.id)
+        }
+      } catch (err) {
+        console.warn("[mogobase/watermelon] remote apply failed", err)
+      } finally {
+        this._applyingRemote = false
+      }
+    }
+  }
+
+  _broadcast(msg: CrossTabMsg) {
+    if (this._applyingRemote || !this._bc) return
+    this._bc.postMessage(msg)
   }
 
   model(name: string): WatermelonMongoAdapter {

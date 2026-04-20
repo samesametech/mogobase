@@ -2,10 +2,21 @@
 // columns — `data` (JSON blob of the full record) and `deleted_at` (soft-delete
 // marker, indexed at the Loki layer). Queries prune deleted rows at the storage
 // layer, then evaluate the rest of the Mongo filter in JS on decoded docs.
+//
+// Every mutation calls the injected `_broadcast` fn so peer tabs can replay it
+// through `_applyUpsert` / `_applyHardDelete`. Remote-apply writes go through
+// the same Watermelon write() path, which fires withChangesForTables and
+// drives the receiving tab's hooks to refresh.
 
 import { Database, Q } from "@nozbe/watermelondb"
 
 import { applyUpdate, decodeRaw, genId, getPath, matches, MongoFilter, MongoUpdate } from "./filters"
+
+export type CrossTabMsg =
+  | { table: string; op: "upsert"; doc: any }
+  | { table: string; op: "hardDelete"; id: string }
+
+export type BroadcastFn = (msg: CrossTabMsg) => void
 
 class FindCursor {
   private _sort?: any
@@ -67,7 +78,11 @@ class FindCursor {
 }
 
 export class WatermelonMongoAdapter {
-  constructor(public _wdb: Database, public name: string) {}
+  constructor(
+    public _wdb: Database,
+    public name: string,
+    private _broadcast: BroadcastFn = () => {}
+  ) {}
 
   private coll() {
     return this._wdb.get(this.name)
@@ -92,16 +107,19 @@ export class WatermelonMongoAdapter {
         r._raw.deleted_at = null
       })
     })
+    this._broadcast({ table: this.name, op: "upsert", doc: record })
     return { acknowledged: true, insertedId: _id }
   }
 
   async insertMany(docs: any[]): Promise<{ acknowledged: true; insertedIds: Record<number, string> }> {
     const ids: Record<number, string> = {}
+    const records: any[] = []
     await this._wdb.write(async () => {
       const prepared = docs.map((d, i) => {
         const _id = d._id || genId()
         ids[i] = _id
         const record = { deletedAt: null, ...d, _id }
+        records.push(record)
         return this.coll().prepareCreate((r: any) => {
           r._raw.id = _id
           r._raw.data = JSON.stringify(record)
@@ -110,6 +128,7 @@ export class WatermelonMongoAdapter {
       })
       await this._wdb.batch(...prepared)
     })
+    for (const r of records) this._broadcast({ table: this.name, op: "upsert", doc: r })
     return { acknowledged: true, insertedIds: ids }
   }
 
@@ -126,15 +145,18 @@ export class WatermelonMongoAdapter {
         }
       })
     })
+    this._broadcast({ table: this.name, op: "upsert", doc: next })
     return { acknowledged: true, matchedCount: 1, modifiedCount: 1 }
   }
 
   async updateMany(filter: MongoFilter, update: MongoUpdate) {
     const targets = await this.find(filter).toArray()
+    const nexts: any[] = []
     await this._wdb.write(async () => {
       const ops = await Promise.all(
         targets.map(async (t) => {
           const next = applyUpdate(t, update)
+          nexts.push(next)
           const record = await this.coll().find(t._id)
           return record.prepareUpdate((r: any) => {
             r._raw.data = JSON.stringify(next)
@@ -146,6 +168,7 @@ export class WatermelonMongoAdapter {
       )
       await this._wdb.batch(...ops)
     })
+    for (const n of nexts) this._broadcast({ table: this.name, op: "upsert", doc: n })
     return { acknowledged: true, matchedCount: targets.length, modifiedCount: targets.length }
   }
 
@@ -161,24 +184,29 @@ export class WatermelonMongoAdapter {
         r._raw.deleted_at = now
       })
     })
+    this._broadcast({ table: this.name, op: "upsert", doc: next })
     return { acknowledged: true, deletedCount: 1 }
   }
 
   async deleteMany(filter: MongoFilter) {
     const targets = await this.find(filter).toArray()
     const now = new Date().toISOString()
+    const nexts: any[] = []
     await this._wdb.write(async () => {
       const ops = await Promise.all(
         targets.map(async (t) => {
+          const next = { ...t, deletedAt: now }
+          nexts.push(next)
           const record = await this.coll().find(t._id)
           return record.prepareUpdate((r: any) => {
-            r._raw.data = JSON.stringify({ ...t, deletedAt: now })
+            r._raw.data = JSON.stringify(next)
             r._raw.deleted_at = now
           })
         })
       )
       await this._wdb.batch(...ops)
     })
+    for (const n of nexts) this._broadcast({ table: this.name, op: "upsert", doc: n })
     return { acknowledged: true, deletedCount: targets.length }
   }
 
@@ -203,6 +231,47 @@ export class WatermelonMongoAdapter {
       const record = await this.coll().find(target._id)
       await record.destroyPermanently()
     })
+    this._broadcast({ table: this.name, op: "hardDelete", id: target._id })
     return { acknowledged: true, deletedCount: 1 }
+  }
+
+  // Cross-tab receiver path. Looks up by id bypassing the soft-delete filter
+  // so a soft-deleted-in-peer record can still be updated (its deletedAt
+  // travels in the broadcast doc, and we set `deleted_at` accordingly).
+  async _applyUpsert(doc: any) {
+    const _id = doc._id
+    if (!_id) return
+    let existing: any = null
+    try {
+      existing = await this.coll().find(_id)
+    } catch {
+      // Not found; will create below.
+    }
+    await this._wdb.write(async () => {
+      if (existing) {
+        await existing.update((r: any) => {
+          r._raw.data = JSON.stringify(doc)
+          r._raw.deleted_at = doc.deletedAt ?? null
+        })
+      } else {
+        await this.coll().create((r: any) => {
+          r._raw.id = _id
+          r._raw.data = JSON.stringify(doc)
+          r._raw.deleted_at = doc.deletedAt ?? null
+        })
+      }
+    })
+  }
+
+  async _applyHardDelete(id: string) {
+    let record: any = null
+    try {
+      record = await this.coll().find(id)
+    } catch {
+      return
+    }
+    await this._wdb.write(async () => {
+      await record.destroyPermanently()
+    })
   }
 }
