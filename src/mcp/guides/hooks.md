@@ -20,7 +20,7 @@ export function TodoList() {
 }
 ```
 
-**Online mode**: opens a native WebSocket to `/ws` on `window.location.origin`, sends `{ type: "query", name: "listTodos", args: {} }`, receives a `QueryResult`, and re-runs the handler on every matching change-stream event. Each re-run replaces `data` wholesale. For incremental diffs over a cursor window, use `usePaginatedQuery` instead.
+**Online mode**: opens a native WebSocket to `/ws` on `window.location.origin`, sends `{ type: "query", name: "listTodos", args: {} }`, receives a `QueryResult`, and re-runs the handler on every matching change-stream event. Each re-run replaces `data` wholesale. For cursor-paginated results, use `usePaginatedQuery` instead.
 
 **Offline mode**: runs the handler directly against `clientDB` and re-runs on `clientDB.observeChanges(collectionName)` events.
 
@@ -78,13 +78,13 @@ export function Feed() {
 
 ### Protocol (online)
 
-Unlike `useQuery` (which re-runs the whole handler on every change), `usePaginatedQuery` maintains a **window-scoped live subscription** over the loaded pages and applies incremental diffs.
+When any `ctx.watch(...)`-registered collection emits a change-stream event, the server re-runs the handler with the currently loaded window as the effective `limit` and pushes a fresh `PaginatedQueryResult`. The client replaces `results` wholesale. This matches `useQuery`'s semantics — pagination just scopes the result set.
 
 Client → server:
 
 | Frame | When |
 |---|---|
-| `{ type: "paginated-query", name, args: { ...args, paginationArgs } }` | First mount or when `args` / `pageSize` change. |
+| `{ type: "paginated-query", name, args: { ...args, paginationOpts } }` | First mount or when `args` / `pageSize` change. |
 | `{ type: "paginated-query-load-next" }` | `loadNext()` — appends the next page using the stored next cursor. |
 | `{ type: "paginated-query-load-previous" }` | `loadPrevious()` — prepends the previous page. |
 
@@ -92,17 +92,24 @@ Server → client:
 
 | Frame | Contains |
 |---|---|
-| `PaginatedQueryResult` | `data` with `{ results, hasNext, hasPrevious, next, previous }` — result of the initial handler run. |
+| `PaginatedQueryResult` | `data` with `{ results, hasNext, hasPrevious, next, previous }`. Emitted on initial subscribe **and** on every subsequent watched change. Replaces the whole displayed result set. |
 | `PaginatedQueryPage` | `{ direction: "next" \| "previous", data: { results, hasNext \| hasPrevious } }` — result of a subsequent load. |
-| `AddDoc` | A doc entered the loaded window (insert, or update that moved it into window/matcher). Client inserts sorted by `paginatedField`. |
-| `UpdateDoc` | A doc in the loaded window changed but stayed in the window. Client merges by `_id`. |
-| `RemoveDoc` | A doc left the loaded window (delete, update that moved it out, or matcher mismatch). Client drops by `_id`. |
 
-The server tracks each subscription's loaded id window as `[min, max]` along with `lowerOpen`/`upperOpen` derived from `hasPrevious` × `sortAscending`. Change-stream events (`insert` / `update` / `replace` / `delete`) are filtered against the handler's `filter` passed to `ctx.watch(...)` and then tested against the window. A single change stream persists across `loadNext` / `loadPrevious` — the window grows but the subscription doesn't reset.
+The server tracks `loadedCount` per subscription and uses it as `paginationOpts.limit` on refetches, so scrolled-through pages stay visible even after a live refresh. Concurrent `loadNext`/`loadPrevious` and live refetches are serialized on a per-subscription promise chain, so client frames never arrive out of order.
+
+### TanStack Virtual compatibility
+
+`isLoading` only flips `true` on user-initiated ops (initial subscribe, `loadNext`, `loadPrevious`) — background live refetches leave it `false`. This preserves the canonical infinite-scroll guard:
+
+```ts
+if (lastItem.index >= results.length - 1 && hasNext && !isLoading) loadNext()
+```
+
+Pass `getItemKey: (i) => results[i]?._id` to keep virtualizer row positions stable across refetches. The server returns results in the same `paginatedField` sort order every time.
 
 ### Protocol (offline)
 
-In offline mode the hook runs the handler directly against `clientDB`, uses returned cursors for `loadNext` / `loadPrevious`, and re-runs the full page fetch whenever any watched collection fires `observeChanges`. There are no per-doc `AddDoc` / `UpdateDoc` / `RemoveDoc` diffs offline — changes always trigger a full first-page refetch (preserving the current scroll position is the consumer's job).
+In offline mode the hook runs the handler directly against `clientDB`, uses returned cursors for `loadNext` / `loadPrevious`, and re-runs the full page fetch whenever any watched collection fires `observeChanges`. Changes always trigger a full refetch of the loaded pages (preserving the current scroll position is the consumer's job).
 
 ## URL resolution
 
