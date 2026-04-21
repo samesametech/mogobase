@@ -39,6 +39,7 @@ type PaginationData = {
   pageSize: number
   sortAscending?: boolean
   sortCaseInsensitive?: boolean
+  /** Accepted for backward compatibility; the server handler controls the actual paginatedField via MongoPaging.find. */
   paginatedField?: string
 }
 
