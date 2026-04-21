@@ -61,11 +61,15 @@ The custom server is meant to be run at the project root via `tsx`. If you moved
 
 ## Paginated query: doc changes aren't pushed
 
-`usePaginatedQuery` relies on the handler calling `ctx.watch(modelName, filter, { paginatedField, sortAscending })`. Without the filter + options, the server can't decide whether a change-stream event belongs to the loaded window, so diffs are dropped. Pass the **same filter** you pass to `MongoPaging.find`, and pass `paginatedField` / `sortAscending` from `args.paginationArgs`.
+`usePaginatedQuery` refetches the full loaded window whenever any `ctx.watch(modelName)`-registered collection emits a change-stream event. If live updates aren't arriving:
 
-## Paginated query: only `_id` sort works
+1. Confirm the handler calls `ctx.watch("<collection>")` for every collection whose data influences the query output. Enriched queries (e.g., posts with a joined `category`) need `ctx.watch("posts")` **and** `ctx.watch("categories")`.
+2. Confirm your Mongo deployment supports change streams (replica set or sharded cluster — standalone `mongod` does not emit events).
+3. Check the browser network tab: you should see a single WebSocket connection and a `PaginatedQueryResult` frame after every upstream mutation.
 
-The server's window-matching is keyed on `paginatedField`. If your handler sorts/cursors on a different field, you must pass `{ paginatedField: "createdAt" }` (or whatever) to `ctx.watch` — otherwise the server tracks `_id` values which won't match the page boundaries.
+## Paginated query: custom `paginatedField` not sorting
+
+The server no longer tracks per-window boundaries — the handler's own `MongoPaging.find` call controls sort order. If a different `paginatedField` isn't being honored, confirm the handler passes it to `MongoPaging.find` and that the client hook's `paginationData.paginatedField` matches. The `paginatedField` option on `ctx.watch` is no longer consumed; it's safe to remove.
 
 ## Offline: tab B doesn't see writes from tab A
 
