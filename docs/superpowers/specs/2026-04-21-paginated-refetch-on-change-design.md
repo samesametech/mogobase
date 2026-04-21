@@ -108,7 +108,7 @@ No `fullDocumentBeforeChange` needed anymore — we never look at pre-images.
 Plain object filters (second arg) are **ignored** by the paginated path;
 they were only used by `matchFilter` which is going away. Options argument
 is ignored too (`paginatedField`, `sortAscending` are read from
-`paginationArgs` in the args, not from watch options). Leaving the
+`paginationOpts` in the args, not from watch options). Leaving the
 `ctx.watch` **signature** unchanged preserves compatibility with existing
 handlers.
 
@@ -131,12 +131,12 @@ async function runRefetch(id, ws, sub) {
   const s = state.get(id)
   if (!s || s.paginated !== sub || ws.readyState !== ws.OPEN) return
 
-  const paginationArgs = {
+  const paginationOpts = {
     limit: sub.loadedCount,
     sortAscending: sub.sortAscending,
     sortCaseInsensitive: sub.sortCaseInsensitive,
   }
-  const callArgs = { ...sub.baseArgs, paginationArgs }
+  const callArgs = { ...sub.baseArgs, paginationOpts }
 
   try {
     await DB.connect()
@@ -220,8 +220,9 @@ existing handler already does `setData(results)` on receipt.
 - Keep `mergeArray` (still used by `PaginatedQueryPage`).
 - `paginatedField` / `sortAscending` in closure scope — `sortAscending` is
   still used for the pagination args payload; `paginatedField` is no longer
-  consumed client-side (only by the server, from `paginationArgs`). Can
-  stop reading `paginatedField` in the hook body if it becomes unused.
+  consumed client-side (the server reads it from `args.paginationOpts`
+  per handler). Can stop reading `paginatedField` in the hook body if it
+  becomes unused.
 
 ### Protocol
 
@@ -284,18 +285,21 @@ same `paginatedField` sort order every time, so visible rows don't jump.
 
 **Edit:**
 
-- `src/server/attachWs.ts` — core rewrite of the paginated path (see above).
+- `src/server/attachWs.ts` — core rewrite of the paginated path (see
+  above). **Also rename the args key** `paginationArgs` → `paginationOpts`
+  (two sites: `runPaginatedInitial`'s `args?.paginationArgs` and the
+  `delete baseArgs.paginationArgs` plus `runPaginatedLoadMore`'s
+  `{ ...sub.baseArgs, paginationArgs }` → `paginationOpts`). This aligns
+  the server with the hook, which already sends `paginationOpts`.
+  Consumer handler files that destructure `args.paginationArgs` need to
+  update to `args.paginationOpts`.
+- `src/server/ws.ts` — legacy Hono WS wiring. Same
+  `paginationArgs` → `paginationOpts` rename (two sites mirroring
+  `attachWs.ts`). Keep in sync even though `ws.ts` isn't used from the
+  Next.js custom-server path.
 - `src/client/hooks/usePaginatedQuery.ts` — remove incremental handlers,
-  remove `insertSorted`. **Also fix pre-existing bug**: the WebSocket
-  payload currently sends `paginationOpts: { limit, sortAscending, ... }`
-  but the server (`attachWs.ts`) and handlers expect `paginationArgs`.
-  The installed copy in `mogobase-examples` already uses `paginationArgs`
-  (which is why things work in practice); the source file drifted. Rename
-  `paginationOpts` → `paginationArgs` in both the online send (line 114
-  area) and the offline `runQuery` call (line 198 area). Without this
-  fix, refetch `paginationArgs = { limit: loadedCount, ... }` would be
-  silently dropped and every refetch would return `pageSize=10` rows
-  instead of the loaded window.
+  remove `insertSorted`. The source already uses `paginationOpts` as the
+  payload key (no hook-source rename needed).
 - `README.md` — rewrite the paginated reactive bullet (`Reactive queries`
   line), remove mention of `AddDoc` / `UpdateDoc` / `RemoveDoc` diffs,
   remove the "paginatedField / sortAscending window" language from the
@@ -303,16 +307,25 @@ same `paginatedField` sort order every time, so visible rows don't jump.
 - `src/mcp/guides/hooks.md` — rewrite the "Protocol (online)" section
   under `usePaginatedQuery` to describe refetch-and-replace semantics and
   drop the `AddDoc`/`UpdateDoc`/`RemoveDoc` table rows. Note the
-  TanStack Virtual compatibility guarantee.
+  TanStack Virtual compatibility guarantee. Update the client → server
+  frame row from `{ ...args, paginationArgs }` to
+  `{ ...args, paginationOpts }`.
 - `src/mcp/guides/handlers.md` — rewrite the `ctx.watch` second-arg and
   options sections to reflect that paginated handlers now behave like
   `useQuery` (filter / paginatedField / sortAscending arguments are
   no longer needed for paginated, but are still accepted for signature
   compatibility with `useQuery` pipeline forwarding). Update the
-  `listPosts` example to drop the filter-as-matcher language.
+  `listPosts` example to drop the filter-as-matcher language and to
+  use `paginationOpts` instead of `paginationArgs` in both the args
+  schema (`paginationOpts: PaginationQueryArgs`) and the handler body
+  (`args.paginationOpts.limit`, etc.).
+- `src/mcp/guides/troubleshooting.md` — update the entry that mentions
+  `args.paginationArgs` to `args.paginationOpts`, and remove the
+  filter-as-matcher guidance (no longer needed with refetch-and-replace).
 - `CLAUDE.md` — rewrite the `attachWs.ts` architecture paragraph to
-  describe the new refetch semantics and remove the
-  `matchFilter` / `keyInWindow` / `PaginatedSub.ids` description.
+  describe the new refetch semantics, remove the
+  `matchFilter` / `keyInWindow` / `PaginatedSub.ids` description, and
+  update any `paginationArgs` references to `paginationOpts`.
 - `package.json` — version bump to `2.5.0` (already uncommitted at
   head of `main`; this spec formalizes what that bump is for).
 
@@ -352,13 +365,34 @@ same `paginatedField` sort order every time, so visible rows don't jump.
 
 - **Semver:** minor bump (`2.4.x` → `2.5.0`; bump already uncommitted in
   working tree). Hook files are copied into consumers via `mogobase install`;
-  consumers must re-run install to pick up the new client. The server protocol is a strict superset of the old
-  client (old clients receive `PaginatedQueryResult` on changes instead
-  of `AddDoc`/`UpdateDoc`/`RemoveDoc` — the existing `PaginatedQueryResult`
+  consumers must re-run install to pick up the new client. The server
+  protocol is a strict superset of the old client (old clients receive
+  `PaginatedQueryResult` on changes instead of
+  `AddDoc`/`UpdateDoc`/`RemoveDoc` — the existing `PaginatedQueryResult`
   handler already does `setData(results)`, so old clients still display
   correctly without the diff handlers firing).
-- **Consumer action:** re-run `npx mogobase install` (will overwrite the
-  hook files) after upgrading.
+- **Breaking for consumer handlers:** any handler that destructures
+  `args.paginationArgs` must be renamed to `args.paginationOpts`. Call
+  this out in the release notes. This affects handlers that extend
+  `PaginationQueryArgs` — the schema name (the runtime export) does
+  **not** change, only the key it's nested under in the args object.
+- **Consumer action:**
+  1. Re-run `npx mogobase install` to refresh the hook files.
+  2. Update each handler file in `./mogobase/*.ts` from
+     `args.paginationArgs` to `args.paginationOpts`. The hook has
+     always sent `paginationOpts` — only the server-side and docs were
+     inconsistent, so the installed copy in `mogobase-examples` needed
+     a manual patch to `paginationArgs` to work with the old server.
+     That patch is now unwound in both directions.
+- **Sibling updates in `mogobase-examples` (separate repo):**
+  - `src/hooks/usePaginatedQuery.ts` → the `mogobase install`-copied file;
+    will be overwritten on re-install. After reinstall, it'll send
+    `paginationOpts` again (the source convention).
+  - `mogobase/posts.ts`, `mogobase/categories.ts` → handler files that
+    destructure `paginationArgs`; rename the key in both schema
+    (`paginationArgs: PaginationQueryArgs` → `paginationOpts:
+    PaginationQueryArgs`) and body (`const { paginationArgs } = args` →
+    `const { paginationOpts } = args`; references downstream to match).
 
 ## Verification plan
 
