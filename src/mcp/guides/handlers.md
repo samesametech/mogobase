@@ -37,26 +37,17 @@ The second parameter of every handler is `ctx` with these fields:
 | `runQuery(name, args)` | queries + mutations | Call another query handler. Internal names must be prefixed: `runQuery("internal.foo", args)`. |
 | `runMutation(name, args)` | queries + mutations | Call another mutation handler. |
 | `headers` | queries + mutations | Incoming request headers (from the HTTP POST or the WebSocket upgrade). Use for auth. |
-| `watch(modelName, filterOrPipeline?, options?)` | **queries only** | Opt into live-query semantics. When called, the server keeps a MongoDB change stream open and pushes updates on the open WebSocket to this query subscription. For `useQuery` it triggers a re-run; for `usePaginatedQuery` the second arg is the filter used to decide whether a changed doc belongs to the loaded window. |
+| `watch(modelName, filterOrPipeline?, options?)` | **queries only** | Opt into live-query semantics. When called, the server keeps a MongoDB change stream open and pushes updates on the open WebSocket to this query subscription. Both `useQuery` and `usePaginatedQuery` trigger a fresh handler run on every passing change-stream event — `usePaginatedQuery` re-runs the handler with the loaded window as the `limit` and pushes a new `PaginatedQueryResult`. |
 
 ### `ctx.watch` second arg: filter vs pipeline
 
-- **Plain object** → interpreted as a Mongo filter. Used by `usePaginatedQuery` as the matcher for incoming change-stream events: the server only sends `AddDoc` / `UpdateDoc` / `RemoveDoc` for docs that pass this filter.
-- **Array** → interpreted as an aggregation pipeline passed through to `collection.watch(pipeline)`. Use this when you need server-side pre-filtering of the change stream.
-- **Omitted** → unfiltered watch.
+- **Array** → interpreted as an aggregation pipeline passed through to `collection.watch(pipeline)`. Use this when you need server-side pre-filtering of the change stream (e.g., only events for docs whose `_id` matches). Both `useQuery` and `usePaginatedQuery` trigger a fresh handler run on every passing event.
+- **Plain object** → ignored. Legacy from the prior incremental-diff paginated path; kept in the signature so existing handlers still compile. Use a pipeline instead when you need server-side filtering.
+- **Omitted** → unfiltered watch. The handler re-runs on every change to the collection.
 
-### `ctx.watch` options (paginated queries)
+### `ctx.watch` options
 
-```ts
-ctx.watch("posts", { authorId }, { paginatedField: "createdAt", sortAscending: false })
-```
-
-| Option | Default | Purpose |
-|---|---|---|
-| `paginatedField` | `"_id"` | The field the handler sorts/cursors on. The server uses it to decide if a doc's key falls inside the loaded window. |
-| `sortAscending` | `true` | Sort direction. Combined with `hasPrevious` / `hasNext` to determine which side of the window is open. |
-
-Any other keys are forwarded to `collection.watch(undefined, options)` as `ChangeStreamOptions` (e.g., `startAfter`).
+The third arg is forwarded to `collection.watch(pipeline, options)` as `ChangeStreamOptions` (e.g., `startAfter`, `resumeAfter`). The server always sets `fullDocument: "updateLookup"` for `useQuery`; paginated handlers don't need the full document on change events (they just re-run the handler), so pagination options like `paginatedField` / `sortAscending` are **not** needed on `ctx.watch` anymore — they only live in `args.paginationOpts`.
 
 ## Queries
 
@@ -130,24 +121,24 @@ query("listPosts", {
     const filter: any = {}
     if (args.authorId) filter.authorId = args.authorId
 
-    // The filter + options here are used ONLY by the WebSocket subscription
-    // to decide if incoming change-stream events belong to the loaded window.
-    // The actual Mongo query still happens below via MongoPaging.find.
-    watch("posts", filter, { paginatedField: "_id", sortAscending: args.paginationArgs.sortAscending })
+    // Trigger a refetch whenever any post changes. The server will re-run this
+    // handler with paginationOpts.limit set to however many rows the client has
+    // loaded (initial pageSize + any loadNext calls).
+    watch("posts")
 
     return await MongoPaging.find(db.model("posts").collection, {
       query: filter,
       paginatedField: "_id",
-      limit: args.paginationArgs.limit,
-      sortAscending: args.paginationArgs.sortAscending,
-      next: args.paginationArgs.next,
-      previous: args.paginationArgs.previous,
+      limit: args.paginationOpts.limit,
+      sortAscending: args.paginationOpts.sortAscending,
+      next: args.paginationOpts.next,
+      previous: args.paginationOpts.previous,
     })
   },
 })
 ```
 
-The server then emits incremental `AddDoc` / `UpdateDoc` / `RemoveDoc` frames per change-stream event that matches both the filter and the loaded window. See the `hooks` guide for the wire protocol.
+If the handler enriches rows from other collections (e.g., `post.category`), call `ctx.watch("categories")` too — every watched collection triggers a full refetch on change, so category-name edits propagate into the rendered posts.
 
 ## Naming conventions
 
