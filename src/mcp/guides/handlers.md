@@ -47,7 +47,9 @@ The second parameter of every handler is `ctx` with these fields:
 
 ### `ctx.watch` options
 
-The third arg is forwarded to `collection.watch(pipeline, options)` as `ChangeStreamOptions` (e.g., `startAfter`, `resumeAfter`). The server always sets `fullDocument: "updateLookup"` for `useQuery`; paginated handlers don't need the full document on change events (they just re-run the handler), so pagination options like `paginatedField` / `sortAscending` are **not** needed on `ctx.watch` anymore — they only live in `args.paginationOpts`.
+The third arg is forwarded to `collection.watch(pipeline, options)` as `ChangeStreamOptions` (e.g., `startAfter`, `resumeAfter`). Pagination options like `paginatedField` / `sortAscending` are **not** needed on `ctx.watch` anymore — they only live in `args.paginationOpts`.
+
+The server sets `fullDocument: "updateLookup"` automatically (and for `useQuery` also `fullDocumentBeforeChange: "whenAvailable"`), so those keys never need to be passed explicitly. The paginated path omits `fullDocumentBeforeChange` because change events are only used to trigger a refetch — the changed document itself isn't read.
 
 ## Queries
 
@@ -123,7 +125,7 @@ query("listPosts", {
 
     // Trigger a refetch whenever any post changes. The server will re-run this
     // handler with paginationOpts.limit set to however many rows the client has
-    // loaded (initial pageSize + any loadNext calls).
+    // loaded (initial pageSize + any loadNext or loadPrevious calls).
     watch("posts")
 
     return await MongoPaging.find(db.model("posts").collection, {
@@ -137,6 +139,8 @@ query("listPosts", {
   },
 })
 ```
+
+The handler hardcodes `paginatedField: "_id"` in the `MongoPaging.find` call — that is the source of truth for the sort field on the server. `PaginationQueryArgs` exposes an optional `paginatedField` in the schema and `usePaginatedQuery` accepts one as a hook option, but both are ignored unless the handler explicitly reads `args.paginationOpts.paginatedField` and forwards it to `MongoPaging.find`. Pick one field per handler and stick with it.
 
 If the handler enriches rows from other collections (e.g., `post.category`), call `ctx.watch("categories")` too — every watched collection triggers a full refetch on change, so category-name edits propagate into the rendered posts.
 
