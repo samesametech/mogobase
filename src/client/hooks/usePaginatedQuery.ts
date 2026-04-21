@@ -26,30 +26,6 @@ const mergeArray = (arr1: any[], arr2: any[], key: string, insert: boolean = fal
   return result
 }
 
-function keyCompare(a: any, b: any): number {
-  if (a == null && b == null) return 0
-  if (a == null) return -1
-  if (b == null) return 1
-  if (a < b) return -1
-  if (a > b) return 1
-  return 0
-}
-
-function insertSorted(arr: any[], doc: any, field: string, sortAscending: boolean) {
-  const key = doc[field]
-  for (let i = 0; i < arr.length; i++) {
-    const existingKey = arr[i][field]
-    const delta = keyCompare(existingKey, key)
-    const shouldInsertHere = sortAscending ? delta > 0 : delta < 0
-    if (shouldInsertHere) {
-      const out = arr.slice()
-      out.splice(i, 0, doc)
-      return out
-    }
-  }
-  return [...arr, doc]
-}
-
 function safeCloseWS(ws: WebSocket | null | undefined) {
   if (!ws) return
   if (ws.readyState === WebSocket.CONNECTING) {
@@ -74,7 +50,6 @@ function usePaginatedQuery(name: string, args?: any, paginationData: PaginationD
   const [hasPrevious, setHasPrevious] = useState<boolean>(false)
 
   const ws = useRef<WebSocket | null>(null)
-  const paginatedField = paginationData.paginatedField ?? "_id"
   const sortAscending = paginationData.sortAscending ?? true
 
   const argsKey = typeof args === "object" ? JSON.stringify(args) : args
@@ -151,15 +126,6 @@ function usePaginatedQuery(name: string, args?: any, paginationData: PaginationD
           } else {
             console.error(rs.error)
           }
-        } else if (rs.type === "UpdateDoc") {
-          setData((d) => mergeArray(d, [rs.data], "_id"))
-        } else if (rs.type === "AddDoc") {
-          setData((d) => {
-            if (d.some((x) => x._id === rs.data._id)) return d
-            return insertSorted(d, rs.data, paginatedField, sortAscending)
-          })
-        } else if (rs.type === "RemoveDoc") {
-          setData((d) => d.filter((item) => item._id !== rs.data?._id))
         }
       })
 
