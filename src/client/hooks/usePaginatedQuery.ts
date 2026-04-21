@@ -50,6 +50,15 @@ function insertSorted(arr: any[], doc: any, field: string, sortAscending: boolea
   return [...arr, doc]
 }
 
+function safeCloseWS(ws: WebSocket | null | undefined) {
+  if (!ws) return
+  if (ws.readyState === WebSocket.CONNECTING) {
+    ws.addEventListener("open", () => ws.close(), { once: true })
+  } else if (ws.readyState === WebSocket.OPEN) {
+    ws.close()
+  }
+}
+
 type PaginationData = {
   pageSize: number
   sortAscending?: boolean
@@ -57,11 +66,7 @@ type PaginationData = {
   paginatedField?: string
 }
 
-function usePaginatedQuery(
-  name: string,
-  args?: any,
-  paginationData: PaginationData = { pageSize: 10 }
-) {
+function usePaginatedQuery(name: string, args?: any, paginationData: PaginationData = { pageSize: 10 }) {
   const { online, ready, clientDB } = useMogobase()
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState<boolean>(false)
@@ -72,35 +77,18 @@ function usePaginatedQuery(
   const paginatedField = paginationData.paginatedField ?? "_id"
   const sortAscending = paginationData.sortAscending ?? true
 
-  const argsKey = JSON.stringify(args)
-
-  // --- Online (WebSocket) path ---
-  const sendInitial = useCallback(() => {
-    setLoading(true)
-    ws.current?.send(
-      JSON.stringify({
-        type: "paginated-query",
-        name,
-        args: {
-          ...(args || {}),
-          paginationArgs: {
-            limit: paginationData.pageSize,
-            sortAscending,
-            sortCaseInsensitive: paginationData.sortCaseInsensitive ?? false,
-          },
-        },
-      })
-    )
-  }, [name, argsKey, paginationData.pageSize, sortAscending, paginationData.sortCaseInsensitive])
+  const argsKey = typeof args === "object" ? JSON.stringify(args) : args
 
   const sendLoadNext = useCallback(() => {
+    if (ws.current?.readyState !== WebSocket.OPEN) return
     setLoading(true)
-    ws.current?.send(JSON.stringify({ type: "paginated-query-load-next" }))
+    ws.current.send(JSON.stringify({ type: "paginated-query-load-next" }))
   }, [])
 
   const sendLoadPrevious = useCallback(() => {
+    if (ws.current?.readyState !== WebSocket.OPEN) return
     setLoading(true)
-    ws.current?.send(JSON.stringify({ type: "paginated-query-load-previous" }))
+    ws.current.send(JSON.stringify({ type: "paginated-query-load-previous" }))
   }, [])
 
   // --- Offline path state ---
@@ -109,14 +97,31 @@ function usePaginatedQuery(
   const offlineRunRef = useRef<((direction?: "next" | "previous") => Promise<void>) | null>(null)
 
   useEffect(() => {
+    if (argsKey === "skip") return
     if (online) {
-      ws.current = new WebSocket(wsUrl())
+      const wsLocal = new WebSocket(wsUrl())
+      ws.current = wsLocal
+      setLoading(true)
 
-      ws.current.addEventListener("open", () => {
-        sendInitial()
+      wsLocal.addEventListener("open", () => {
+        if (ws.current !== wsLocal) return
+        wsLocal.send(
+          JSON.stringify({
+            type: "paginated-query",
+            name,
+            args: {
+              ...(args || {}),
+              paginationOpts: {
+                limit: paginationData.pageSize,
+                sortAscending,
+                sortCaseInsensitive: paginationData.sortCaseInsensitive ?? false,
+              },
+            },
+          })
+        )
       })
 
-      ws.current.addEventListener("message", (event) => {
+      wsLocal.addEventListener("message", (event) => {
         const rs = JSON.parse(event.data)
         if (rs.type === "PaginatedQueryResult") {
           setLoading(false)
@@ -158,8 +163,21 @@ function usePaginatedQuery(
         }
       })
 
+      wsLocal.addEventListener("error", (event) => {
+        setLoading(false)
+        console.error(`[mogobase] usePaginatedQuery(${name}) ws error`, event)
+      })
+
+      wsLocal.addEventListener("close", (event) => {
+        setLoading(false)
+        if (!event.wasClean) {
+          console.warn(`[mogobase] usePaginatedQuery(${name}) ws closed`, event.code, event.reason)
+        }
+      })
+
       return () => {
-        ws.current?.close()
+        if (ws.current === wsLocal) ws.current = null
+        safeCloseWS(wsLocal)
         setData([])
         setHasNext(false)
         setHasPrevious(false)
@@ -177,19 +195,18 @@ function usePaginatedQuery(
       for (const s of subs) s.unsubscribe()
       subs = []
       const seen = new Set<string>()
-      const paginationArgs: any = {
+      const paginationOpts: any = {
         limit: paginationData.pageSize,
         sortAscending,
         sortCaseInsensitive: paginationData.sortCaseInsensitive ?? false,
       }
-      if (direction === "next" && offlineNextRef.current) paginationArgs.next = offlineNextRef.current
-      if (direction === "previous" && offlinePrevRef.current)
-        paginationArgs.previous = offlinePrevRef.current
+      if (direction === "next" && offlineNextRef.current) paginationOpts.next = offlineNextRef.current
+      if (direction === "previous" && offlinePrevRef.current) paginationOpts.previous = offlinePrevRef.current
 
       try {
         const rs = await runQuery(
           name,
-          { ...(args || {}), paginationArgs },
+          { ...(args || {}), paginationOpts },
           { db: clientDB, watch: (modelName: string) => seen.add(modelName) }
         )
         if (cancelled) return
@@ -232,7 +249,7 @@ function usePaginatedQuery(
       setHasPrevious(false)
       setLoading(false)
     }
-  }, [online, ready, name, argsKey, paginationData.pageSize, sendInitial])
+  }, [online, ready, name, argsKey, paginationData.pageSize, sortAscending, paginationData.sortCaseInsensitive])
 
   const loadNext = useCallback(() => {
     if (!online) {

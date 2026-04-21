@@ -12,14 +12,24 @@ function wsUrl(): string {
   return "ws://localhost:3000/ws"
 }
 
+function safeCloseWS(ws: WebSocket | null | undefined) {
+  if (!ws) return
+  if (ws.readyState === WebSocket.CONNECTING) {
+    ws.addEventListener("open", () => ws.close(), { once: true })
+  } else if (ws.readyState === WebSocket.OPEN) {
+    ws.close()
+  }
+}
+
 function useQuery(name: string, args?: any) {
   const { online, ready, clientDB } = useMogobase()
   const [data, setData] = useState<any>(undefined)
 
-  const argsKey = JSON.stringify(args)
+  const argsKey = typeof args === "object" ? JSON.stringify(args) : args
 
   useEffect(() => {
     setData(undefined)
+    if (argsKey === "skip") return
     if (online) {
       const ws = new WebSocket(wsUrl())
 
@@ -35,8 +45,18 @@ function useQuery(name: string, args?: any) {
         }
       })
 
+      ws.addEventListener("error", (event) => {
+        console.error(`[mogobase] useQuery(${name}) ws error`, event)
+      })
+
+      ws.addEventListener("close", (event) => {
+        if (!event.wasClean) {
+          console.warn(`[mogobase] useQuery(${name}) ws closed`, event.code, event.reason)
+        }
+      })
+
       return () => {
-        ws.close()
+        safeCloseWS(ws)
         setData(undefined)
       }
     }
