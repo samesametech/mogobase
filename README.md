@@ -3,7 +3,7 @@
 A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive queries over WebSockets, Convex-style typed handlers, and **offline support** via RxDB or WatermelonDB.
 
 - **Typed handlers** — define `query()` / `mutation()` with zod-validated args.
-- **Reactive queries** — `useQuery` re-runs its handler on MongoDB change stream events; `usePaginatedQuery` maintains a window-scoped subscription and pushes per-doc `AddDoc` / `UpdateDoc` / `RemoveDoc` diffs so loaded pages stay live without re-fetching.
+- **Reactive queries** — `useQuery` and `usePaginatedQuery` both re-run their handlers on MongoDB change stream events. For `usePaginatedQuery` the server reuses the currently-loaded window as the effective limit so scroll position is preserved across refetches, and enrichments from joined collections (watched with additional `ctx.watch` calls) stay fresh.
 - **Offline mode** — same handlers run in the browser against RxDB/IndexedDB (default) or WatermelonDB/LokiJS when the app is offline. Toggle with `<MogobaseProvider online={...} offlineAdapter="rxdb" | "watermelon">`. Both backends sync writes across same-origin tabs via BroadcastChannel.
 - **One server** — a custom Next.js `server.ts` serves both your app and the mogobase WS endpoint.
 - **MongoDB-native** — thin wrapper around the official driver; no ORM, no schema lock-in.
@@ -93,7 +93,7 @@ Handler `ctx` provides:
 - `ctx.db` — the database (MongoDB server-side, RxDB offline). `ctx.db.model(name)` returns a collection-like object with `find`, `insertOne`, `updateOne`, etc.
 - `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` — call other handlers, including `internal.*`
 - `ctx.headers` — request headers (useful for auth; online only)
-- `ctx.watch(modelName, filterOrPipeline?, options?)` — **queries only**. Subscribes the client to change-stream updates on that collection. For `useQuery` it triggers a re-run on every matching event. For `usePaginatedQuery`, pass the same filter you query with plus `{ paginatedField, sortAscending }` so the server can decide whether a changed doc belongs to the loaded window.
+- `ctx.watch(modelName, pipeline?, options?)` — **queries only**. Subscribes the client to change-stream updates on that collection. Triggers a full handler re-run on every matching event for both `useQuery` and `usePaginatedQuery`. Pass an aggregation pipeline as the second argument for server-side pre-filtering; the third argument forwards to `collection.watch(pipeline, options)` as `ChangeStreamOptions`.
 
 Use `internalQuery()` / `internalMutation()` for handlers that should only be callable from server code (stored under the `internal.` prefix).
 
