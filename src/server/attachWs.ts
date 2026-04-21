@@ -37,25 +37,33 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
   }
 
   const closeStreams = async (id: string) => {
-    const s = state.get(id)
-    const streams = s?.changeStreams || []
+    const streams = state.get(id)?.changeStreams || []
     for (const cs of streams) {
       try {
         await cs.close()
       } catch {}
     }
-    if (s) state.set(id, { ...s, changeStreams: [] })
+    const current = state.get(id)
+    if (current) state.set(id, { ...current, changeStreams: [] })
   }
 
   const closePaginatedSub = async (id: string) => {
-    const s = state.get(id)
-    const streams = s?.paginated?.changeStreams || []
+    const streams = state.get(id)?.paginated?.changeStreams || []
     for (const cs of streams) {
       try {
         await cs.close()
       } catch {}
     }
-    if (s) state.set(id, { ...s, paginated: undefined })
+    const current = state.get(id)
+    if (current) state.set(id, { ...current, paginated: undefined })
+  }
+
+  const bindStreamToWs = (ws: WebSocket, cs: ChangeStream) => {
+    const onWsClose = () => {
+      cs.close().catch(() => {})
+    }
+    ws.once("close", onWsClose)
+    cs.once("close", () => ws.removeListener("close", onWsClose))
   }
 
   async function runRefetch(id: string, ws: WebSocket, sub: PaginatedSub) {
@@ -132,6 +140,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
         headers,
         db: DB,
         watch: (modelName: string, pipelineOrFilter?: Document[] | Document) => {
+          if (ws.readyState !== ws.OPEN) return
           const pipeline = Array.isArray(pipelineOrFilter) ? (pipelineOrFilter as Document[]) : undefined
           const cs = DB.model(modelName).watch(pipeline, {
             fullDocument: "updateLookup",
@@ -144,6 +153,16 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
         throw new Error("Invalid paginated result. Return value must come from MongoPaging.find")
       }
 
+      const existing = state.get(id)
+      if (ws.readyState !== ws.OPEN || !existing) {
+        for (const cs of pendingStreams) {
+          try {
+            await cs.close()
+          } catch {}
+        }
+        return
+      }
+
       sub.loadedCount = rs.results.length
       sub.hasPrevious = !!rs.hasPrevious
       sub.hasNext = !!rs.hasNext
@@ -151,10 +170,10 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
       sub.changeStreams = pendingStreams
 
-      const existing = state.get(id) || { ws }
       state.set(id, { ...existing, paginated: sub })
 
       for (const cs of pendingStreams) {
+        bindStreamToWs(ws, cs)
         cs.on("change", () => scheduleRefetch(id, ws, sub))
       }
 
@@ -264,17 +283,20 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
             db: DB,
             watch: (modelName: string, pipelineOrFilter?: Document[] | Document, options?: any) => {
               if (noWatch) return
+              if (ws.readyState !== ws.OPEN) return
+              const s = state.get(id)
+              if (!s) return
               const isArrayPipeline = Array.isArray(pipelineOrFilter)
               const pipeline = isArrayPipeline ? (pipelineOrFilter as Document[]) : undefined
-              const s = state.get(id)
               const changeStream = DB.model(modelName).watch(pipeline, {
                 ...(options || {}),
                 fullDocument: "updateLookup",
                 fullDocumentBeforeChange: "whenAvailable",
               } as ChangeStreamOptions)
-              const streams: ChangeStream[] = s?.changeStreams || []
+              bindStreamToWs(ws, changeStream)
+              const streams: ChangeStream[] = s.changeStreams || []
               streams.push(changeStream)
-              state.set(id, { ...(s || { ws }), changeStreams: streams })
+              state.set(id, { ...s, changeStreams: streams })
               changeStream.on("change", () => {
                 run(true)
               })

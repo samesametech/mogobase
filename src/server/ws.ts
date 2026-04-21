@@ -36,25 +36,35 @@ class WebSocket {
   }
 
   async _closeStreams(id: string) {
-    const state = this._state.get(id)
-    const streams: ChangeStream[] = state?.changeStreams || []
+    const streams: ChangeStream[] = this._state.get(id)?.changeStreams || []
     for (const s of streams) {
       try {
         await s.close()
       } catch {}
     }
-    if (state) this._state.set(id, { ...state, changeStreams: [] })
+    const current = this._state.get(id)
+    if (current) this._state.set(id, { ...current, changeStreams: [] })
   }
 
   async _closePaginatedSub(id: string) {
-    const state = this._state.get(id)
-    const streams: ChangeStream[] = state?.paginated?.changeStreams || []
+    const streams: ChangeStream[] = this._state.get(id)?.paginated?.changeStreams || []
     for (const cs of streams) {
       try {
         await cs.close()
       } catch {}
     }
-    if (state) this._state.set(id, { ...state, paginated: undefined })
+    const current = this._state.get(id)
+    if (current) this._state.set(id, { ...current, paginated: undefined })
+  }
+
+  _bindStreamToSocket(socket: any, cs: ChangeStream) {
+    const raw = socket?.raw
+    if (!raw || typeof raw.once !== "function" || typeof raw.removeListener !== "function") return
+    const onClose = () => {
+      cs.close().catch(() => {})
+    }
+    raw.once("close", onClose)
+    cs.once("close", () => raw.removeListener("close", onClose))
   }
 
   async _runRefetch(id: string, socket: any, sub: PaginatedSub) {
@@ -127,6 +137,7 @@ class WebSocket {
         headers: headers || null,
         db: DB,
         watch: (modelName: string, pipelineOrFilter?: Document[] | Document) => {
+          if (socket?.readyState !== 1) return
           const pipeline = Array.isArray(pipelineOrFilter) ? (pipelineOrFilter as Document[]) : undefined
           const cs = DB.model(modelName).watch(pipeline, {
             fullDocument: "updateLookup",
@@ -138,6 +149,16 @@ class WebSocket {
         throw new Error("Invalid paginated result. Make sure the return value is from MongoPaging.find")
       }
 
+      const existing = this._state.get(id)
+      if (socket?.readyState !== 1 || !existing) {
+        for (const cs of pendingStreams) {
+          try {
+            await cs.close()
+          } catch {}
+        }
+        return
+      }
+
       sub.loadedCount = rs.results.length
       sub.hasPrevious = !!rs.hasPrevious
       sub.hasNext = !!rs.hasNext
@@ -145,10 +166,10 @@ class WebSocket {
       sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
       sub.changeStreams = pendingStreams
 
-      const existing = this._state.get(id) || {}
       this._state.set(id, { ...existing, paginated: sub })
 
       for (const cs of pendingStreams) {
+        this._bindStreamToSocket(socket, cs)
         cs.on("change", () => this._scheduleRefetch(id, socket, sub))
       }
 
@@ -265,14 +286,17 @@ class WebSocket {
             options?: ChangeStreamOptions
           ) => {
             if (noWatch) return
+            if (socket?.readyState !== 1) return
+            const state = this._state.get(id)
+            if (!state) return
             const isArrayPipeline = Array.isArray(pipelineOrFilter)
             const pipeline = isArrayPipeline ? (pipelineOrFilter as Document[]) : undefined
-            const state = this._state.get(id)
             const changeStream = DB.model(modelName).watch(pipeline, {
               ...(options || {}),
               fullDocument: "updateLookup",
             })
-            const streams: ChangeStream[] = state?.changeStreams || []
+            this._bindStreamToSocket(socket, changeStream)
+            const streams: ChangeStream[] = state.changeStreams || []
             streams.push(changeStream)
             this._state.set(id, { ...state, changeStreams: streams })
             changeStream.on("change", () => {
