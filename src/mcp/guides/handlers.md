@@ -42,7 +42,7 @@ The second parameter of every handler is `ctx` with these fields:
 ### `ctx.watch` second arg: filter vs pipeline
 
 - **Array** → interpreted as an aggregation pipeline passed through to `collection.watch(pipeline)`. Use this when you need server-side pre-filtering of the change stream (e.g., only events for docs whose `_id` matches). Both `useQuery` and `usePaginatedQuery` trigger a fresh handler run on every passing event.
-- **Plain object** → ignored. Legacy from the prior incremental-diff paginated path; kept in the signature so existing handlers still compile. Use a pipeline instead when you need server-side filtering.
+- **Plain object** → ignored. Legacy from the window-scoped paginated path; kept in the signature so existing handlers still compile. Use a pipeline instead when you need server-side filtering.
 - **Omitted** → unfiltered watch. The handler re-runs on every change to the collection.
 
 ### `ctx.watch` options
