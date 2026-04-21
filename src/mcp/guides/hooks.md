@@ -101,15 +101,31 @@ The server tracks `loadedCount` per subscription and uses it as `paginationOpts.
 
 `isLoading` only flips `true` on user-initiated ops (initial subscribe, `loadNext`, `loadPrevious`) — background live refetches leave it `false`. This preserves the canonical infinite-scroll guard:
 
-```ts
-if (lastItem.index >= results.length - 1 && hasNext && !isLoading) loadNext()
+```tsx
+const parentRef = useRef<HTMLDivElement>(null)
+const virtualizer = useVirtualizer({
+  count: results.length,
+  getScrollElement: () => parentRef.current,
+  estimateSize: () => 120,
+  getItemKey: (i) => results[i]?._id ?? i,
+})
+
+const virtualItems = virtualizer.getVirtualItems()
+const lastItem = virtualItems[virtualItems.length - 1]
+
+useEffect(() => {
+  if (!lastItem) return
+  if (lastItem.index >= results.length - 1 && hasNext && !isLoading) {
+    loadNext()
+  }
+}, [lastItem, results.length, hasNext, isLoading, loadNext])
 ```
 
-Pass `getItemKey: (i) => results[i]?._id` to keep virtualizer row positions stable across refetches. The server returns results in the same `paginatedField` sort order every time.
+Pass `getItemKey: (i) => results[i]?._id` to keep virtualizer row positions stable across refetches. The server returns results in the same sort order (as defined by the handler's `MongoPaging.find` call) on every refetch.
 
 ### Protocol (offline)
 
-In offline mode the hook runs the handler directly against `clientDB`, uses returned cursors for `loadNext` / `loadPrevious`, and re-runs the full page fetch whenever any watched collection fires `observeChanges`. Changes always trigger a full refetch of the loaded pages (preserving the current scroll position is the consumer's job).
+In offline mode the hook runs the handler directly against `clientDB`, uses returned cursors for `loadNext` / `loadPrevious`, and re-runs the page fetch whenever any watched collection fires `observeChanges`. Unlike the online path, offline refetches are always scoped to the initial `pageSize` — the loaded window is not preserved offline, so scrolled-through pages collapse back to a single page on any watched change. Preserving scroll position is the consumer's job.
 
 ## URL resolution
 
