@@ -5,64 +5,21 @@ import DB from "@/db"
 import { Hono } from "hono"
 import { ServerType } from "@hono/node-server"
 import { ChangeStream, ChangeStreamOptions, Document } from "mongodb"
-import { matchFilter } from "./matchFilter"
 
 type PaginatedSub = {
   name: string
   baseArgs: any
+  headers: any
   limit: number
   sortAscending: boolean
   sortCaseInsensitive: boolean
-  filter?: Document
-  paginatedField: string
-  ids: Map<string, any>
+  loadedCount: number
   hasPrevious: boolean
   hasNext: boolean
   nextCursor?: string
   previousCursor?: string
-  changeStream?: ChangeStream
-}
-
-function keyStr(v: any): string {
-  if (v == null) return ""
-  if (typeof v === "object" && typeof (v as any).toHexString === "function") {
-    return (v as any).toHexString()
-  }
-  if (v instanceof Date) return v.toISOString()
-  return String(v)
-}
-
-function cmp(a: any, b: any): number {
-  const sa = keyStr(a)
-  const sb = keyStr(b)
-  if (sa < sb) return -1
-  if (sa > sb) return 1
-  return 0
-}
-
-function windowExtremes(sub: PaginatedSub): { min?: any; max?: any } {
-  let min: any, max: any
-  for (const k of sub.ids.values()) {
-    if (min === undefined || cmp(k, min) < 0) min = k
-    if (max === undefined || cmp(k, max) > 0) max = k
-  }
-  return { min, max }
-}
-
-function boundOpenness(sub: PaginatedSub) {
-  const asc = sub.sortAscending
-  const lowerOpen = asc ? !sub.hasPrevious : !sub.hasNext
-  const upperOpen = asc ? !sub.hasNext : !sub.hasPrevious
-  return { lowerOpen, upperOpen }
-}
-
-function keyInWindow(sub: PaginatedSub, key: any): boolean {
-  const { min, max } = windowExtremes(sub)
-  const { lowerOpen, upperOpen } = boundOpenness(sub)
-  if (min === undefined || max === undefined) return lowerOpen && upperOpen
-  const aboveMin = cmp(key, min) >= 0
-  const belowMax = cmp(key, max) <= 0
-  return (aboveMin || lowerOpen) && (belowMax || upperOpen)
+  changeStreams: ChangeStream[]
+  queue: Promise<void>
 }
 
 class WebSocket {
@@ -91,8 +48,8 @@ class WebSocket {
 
   async _closePaginatedSub(id: string) {
     const state = this._state.get(id)
-    const cs: ChangeStream | undefined = state?.paginated?.changeStream
-    if (cs) {
+    const streams: ChangeStream[] = state?.paginated?.changeStreams || []
+    for (const cs of streams) {
       try {
         await cs.close()
       } catch {}
@@ -100,134 +57,119 @@ class WebSocket {
     if (state) this._state.set(id, { ...state, paginated: undefined })
   }
 
-  _handleChange(sub: PaginatedSub, change: any, socket: any) {
-    if (!sub.filter) return
-    const op = change.operationType
-    const after = (change as any).fullDocument
-    const before = (change as any).fullDocumentBeforeChange
-    const docKey = (change as any).documentKey
-    const docId = docKey?._id
-    const docIdStr = keyStr(docId)
+  async _runRefetch(id: string, socket: any, sub: PaginatedSub) {
+    const state = this._state.get(id)
+    if (!state || state.paginated !== sub) return
 
-    if (op === "insert") {
-      if (!after) return
-      const key = after[sub.paginatedField]
-      if (matchFilter(after, sub.filter) && keyInWindow(sub, key)) {
-        sub.ids.set(docIdStr, key)
-        socket.send(JSON.stringify({ type: "AddDoc", success: true, data: after }))
-      }
-      return
+    const paginationOpts = {
+      limit: sub.loadedCount,
+      sortAscending: sub.sortAscending,
+      sortCaseInsensitive: sub.sortCaseInsensitive,
     }
+    const callArgs = { ...sub.baseArgs, paginationOpts }
 
-    if (op === "update" || op === "replace") {
-      const afterKey = after ? after[sub.paginatedField] : undefined
-      const beforeKey = before ? before[sub.paginatedField] : undefined
-      const afterVisible = after
-        ? matchFilter(after, sub.filter) && keyInWindow(sub, afterKey)
-        : false
-      const beforeVisible = before
-        ? matchFilter(before, sub.filter) && keyInWindow(sub, beforeKey)
-        : sub.ids.has(docIdStr)
+    try {
+      await DB.connect()
+      const rs = await handlers._runQuery(sub.name, callArgs, {
+        headers: sub.headers || null,
+        db: DB,
+        watch: () => {},
+      })
+      if (!rs?.results) throw new Error("Invalid paginated result")
 
-      if (beforeVisible && afterVisible) {
-        sub.ids.set(docIdStr, afterKey)
-        socket.send(JSON.stringify({ type: "UpdateDoc", success: true, data: after }))
-      } else if (!beforeVisible && afterVisible) {
-        sub.ids.set(docIdStr, afterKey)
-        socket.send(JSON.stringify({ type: "AddDoc", success: true, data: after }))
-      } else if (beforeVisible && !afterVisible) {
-        sub.ids.delete(docIdStr)
-        socket.send(
-          JSON.stringify({ type: "RemoveDoc", success: true, data: before ?? { _id: docId } })
-        )
-      }
-      return
+      sub.loadedCount = rs.results.length
+      sub.hasPrevious = !!rs.hasPrevious
+      sub.hasNext = !!rs.hasNext
+      sub.nextCursor = rs.hasNext ? rs.next : undefined
+      sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
+
+      socket.send(JSON.stringify({ type: "PaginatedQueryResult", success: true, data: rs }))
+    } catch (error: any) {
+      socket.send(
+        JSON.stringify({
+          type: "PaginatedQueryResult",
+          success: false,
+          error: `${error?.message || error}`,
+        })
+      )
     }
+  }
 
-    if (op === "delete") {
-      if (before) {
-        const beforeKey = before[sub.paginatedField]
-        const beforeVisible = matchFilter(before, sub.filter) && keyInWindow(sub, beforeKey)
-        if (beforeVisible) {
-          sub.ids.delete(docIdStr)
-          socket.send(JSON.stringify({ type: "RemoveDoc", success: true, data: before }))
-        }
-      } else if (sub.ids.has(docIdStr)) {
-        sub.ids.delete(docIdStr)
-        socket.send(JSON.stringify({ type: "RemoveDoc", success: true, data: { _id: docId } }))
-      }
-    }
+  _scheduleRefetch(id: string, socket: any, sub: PaginatedSub) {
+    sub.queue = sub.queue.then(() => this._runRefetch(id, socket, sub)).catch(() => {})
   }
 
   async _runPaginatedInitial(socket: any, id: string, headers: any, name: string, args: any) {
     await this._closePaginatedSub(id)
     await DB.connect()
 
-    const paginationArgs = args?.paginationArgs || {}
+    const paginationOpts = args?.paginationOpts || {}
     const baseArgs = { ...(args || {}) }
-    delete baseArgs.paginationArgs
+    delete baseArgs.paginationOpts
 
+    const pendingStreams: ChangeStream[] = []
     const sub: PaginatedSub = {
       name,
       baseArgs,
-      limit: paginationArgs.limit ?? 10,
-      sortAscending: paginationArgs.sortAscending ?? true,
-      sortCaseInsensitive: paginationArgs.sortCaseInsensitive ?? false,
-      paginatedField: "_id",
-      ids: new Map(),
+      headers,
+      limit: paginationOpts.limit ?? 10,
+      sortAscending: paginationOpts.sortAscending ?? true,
+      sortCaseInsensitive: paginationOpts.sortCaseInsensitive ?? false,
+      loadedCount: 0,
       hasPrevious: false,
       hasNext: false,
+      changeStreams: [],
+      queue: Promise.resolve(),
     }
 
     try {
       const rs = await handlers._runQuery(name, args, {
         headers: headers || null,
         db: DB,
-        watch: (
-          modelName: string,
-          pipelineOrFilter?: Document[] | Document,
-          options?: any
-        ) => {
-          const isArrayPipeline = Array.isArray(pipelineOrFilter)
-          const filter =
-            !isArrayPipeline && pipelineOrFilter && typeof pipelineOrFilter === "object"
-              ? (pipelineOrFilter as Document)
-              : undefined
-          sub.filter = filter
-          if (options?.paginatedField) sub.paginatedField = options.paginatedField
-          if (typeof options?.sortAscending === "boolean") sub.sortAscending = options.sortAscending
-          if (sub.changeStream) return
-          const cs = DB.model(modelName).watch(undefined, {
+        watch: (modelName: string, pipelineOrFilter?: Document[] | Document) => {
+          const pipeline = Array.isArray(pipelineOrFilter) ? (pipelineOrFilter as Document[]) : undefined
+          const cs = DB.model(modelName).watch(pipeline, {
             fullDocument: "updateLookup",
-            fullDocumentBeforeChange: "whenAvailable",
           } as ChangeStreamOptions)
-          sub.changeStream = cs
-          cs.on("change", (change) => this._handleChange(sub, change, socket))
+          pendingStreams.push(cs)
         },
       })
       if (!rs?.results) {
         throw new Error("Invalid paginated result. Make sure the return value is from MongoPaging.find")
       }
-      for (const doc of rs.results) {
-        sub.ids.set(keyStr(doc._id), doc[sub.paginatedField])
-      }
+
+      sub.loadedCount = rs.results.length
       sub.hasPrevious = !!rs.hasPrevious
       sub.hasNext = !!rs.hasNext
       sub.nextCursor = rs.hasNext ? rs.next : undefined
       sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
+      sub.changeStreams = pendingStreams
 
       const existing = this._state.get(id) || {}
       this._state.set(id, { ...existing, paginated: sub })
 
+      for (const cs of pendingStreams) {
+        cs.on("change", () => this._scheduleRefetch(id, socket, sub))
+      }
+
       socket.send(JSON.stringify({ type: "PaginatedQueryResult", success: true, data: rs }))
     } catch (error: any) {
+      for (const cs of pendingStreams) {
+        try {
+          await cs.close()
+        } catch {}
+      }
       socket.send(
-        JSON.stringify({ type: "PaginatedQueryResult", success: false, error: `${error?.message || error}` })
+        JSON.stringify({
+          type: "PaginatedQueryResult",
+          success: false,
+          error: `${error?.message || error}`,
+        })
       )
     }
   }
 
-  async _runPaginatedLoadMore(socket: any, id: string, headers: any, direction: "next" | "previous") {
+  async _runPaginatedLoadMore(socket: any, id: string, direction: "next" | "previous") {
     const state = this._state.get(id)
     const sub: PaginatedSub | undefined = state?.paginated
     if (!sub) {
@@ -251,44 +193,46 @@ class WebSocket {
         })
       )
     }
-    const paginationArgs: any = {
+    const paginationOpts: any = {
       limit: sub.limit,
       sortAscending: sub.sortAscending,
       sortCaseInsensitive: sub.sortCaseInsensitive,
     }
-    if (direction === "next") paginationArgs.next = cursor
-    else paginationArgs.previous = cursor
-    const callArgs = { ...sub.baseArgs, paginationArgs }
+    if (direction === "next") paginationOpts.next = cursor
+    else paginationOpts.previous = cursor
+    const callArgs = { ...sub.baseArgs, paginationOpts }
 
-    try {
-      await DB.connect()
-      const rs = await handlers._runQuery(sub.name, callArgs, {
-        headers: headers || null,
-        db: DB,
-        watch: () => {},
+    sub.queue = sub.queue
+      .then(async () => {
+        try {
+          await DB.connect()
+          const rs = await handlers._runQuery(sub.name, callArgs, {
+            headers: sub.headers || null,
+            db: DB,
+            watch: () => {},
+          })
+          if (!rs?.results) throw new Error("Invalid paginated result")
+          sub.loadedCount += rs.results.length
+          if (direction === "next") {
+            sub.hasNext = !!rs.hasNext
+            sub.nextCursor = rs.hasNext ? rs.next : undefined
+          } else {
+            sub.hasPrevious = !!rs.hasPrevious
+            sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
+          }
+          socket.send(JSON.stringify({ type: "PaginatedQueryPage", success: true, direction, data: rs }))
+        } catch (error: any) {
+          socket.send(
+            JSON.stringify({
+              type: "PaginatedQueryPage",
+              success: false,
+              direction,
+              error: `${error?.message || error}`,
+            })
+          )
+        }
       })
-      if (!rs?.results) throw new Error("Invalid paginated result")
-      for (const doc of rs.results) {
-        sub.ids.set(keyStr(doc._id), doc[sub.paginatedField])
-      }
-      if (direction === "next") {
-        sub.hasNext = !!rs.hasNext
-        sub.nextCursor = rs.hasNext ? rs.next : undefined
-      } else {
-        sub.hasPrevious = !!rs.hasPrevious
-        sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
-      }
-      socket.send(JSON.stringify({ type: "PaginatedQueryPage", success: true, direction, data: rs }))
-    } catch (error: any) {
-      socket.send(
-        JSON.stringify({
-          type: "PaginatedQueryPage",
-          success: false,
-          direction,
-          error: `${error?.message || error}`,
-        })
-      )
-    }
+      .catch(() => {})
   }
 
   async _handleEvent(event: any, socket: any, id: string, headers: any) {
@@ -299,7 +243,6 @@ class WebSocket {
       return this._runPaginatedLoadMore(
         socket,
         id,
-        headers,
         type === "paginated-query-load-next" ? "next" : "previous"
       )
     }
