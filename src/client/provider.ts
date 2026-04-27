@@ -7,11 +7,13 @@ import * as React from "react"
 // Structural type for the offline client DB. Defined here so importing the type
 // does NOT pull rxdb / watermelon into the bundle. The concrete backend modules
 // (`mogobase/client-db`, `mogobase/client-db/watermelon`) export richer types
-// for consumers that want them.
+// for consumers that want them. Parameters use `any` (not `unknown`) so concrete
+// backends with stricter signatures (Mongo IndexDescription[], etc.) satisfy
+// this contract — function parameters are contravariant under strict checks.
 export type MogobaseClientDB = {
-  connect: (dbName?: string) => Promise<unknown>
-  defineModel: (name: string, schema?: unknown, indexes?: unknown) => Promise<unknown> | unknown
-  model: (name: string) => unknown
+  connect: (dbName?: string) => Promise<any>
+  defineModel: (name: string, schema?: any, indexes?: any) => Promise<any> | any
+  model: (name: string) => any
   observeChanges: (name: string) => {
     subscribe: (fn: () => void) => { unsubscribe: () => void }
   }

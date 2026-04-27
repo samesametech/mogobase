@@ -1,7 +1,7 @@
 {
   "name": "mogobase",
   "type": "module",
-  "version": "2.6.0",
+  "version": "2.6.1",
   "description": "",
   "main": "lib/index.js",
   "types": "types/index.d.ts",
