@@ -146,7 +146,8 @@ export { default as usePaginatedQuery } from "./usePaginatedQuery"
     `Add handler files to ./mogobase/ — import from "mogobase/runtime" (isomorphic)`,
     "Set MONGO_URI / MONGO_DB in .env.local",
     `Import hooks from your local copy: import { useQuery, useMutation, usePaginatedQuery } from "@/hooks"`,
-    `Offline mode: wrap app in <MogobaseProvider online={isOnline} handlers={() => import("@/mogobase")}> from "mogobase/provider"`,
+    `Online-only: wrap app in <MogobaseProvider online={true} handlers={() => import("@/mogobase")}> from "mogobase/provider" — no offline backend install needed`,
+    `Offline mode: install rxdb (or @nozbe/watermelondb), then import the singleton (e.g. import RxClientDB from "mogobase/client-db") and pass it as <MogobaseProvider online={isOnline} clientDB={RxClientDB} handlers={() => import("@/mogobase")}>`,
   ]
 
   log("")

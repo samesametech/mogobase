@@ -55,9 +55,42 @@ Defaults are `mongodb://localhost:27017` and `MONGO_DB=mogobase`.
 
 The custom server is meant to be run at the project root via `tsx`. If you moved `server.ts`, adjust imports accordingly. Re-run `npx mogobase install` to restore the template.
 
-## Watermelon install reports peer dep warning
+## Build error: `Cannot find module 'rxdb'` or `'@nozbe/watermelondb'`
 
-`mogobase` declares `@nozbe/watermelondb` as an optional peer dep. If you're using the RxDB backend, ignore the warning. If you picked WatermelonDB, `yarn add @nozbe/watermelondb`.
+Both backends are **optional peer dependencies** in mogobase 2.6+. The consumer's bundler only walks into the backend code if the consumer's source `import`s it. Causes:
+
+1. **You imported the backend without installing it.** If your app has `import RxClientDB from "mogobase/client-db"`, install `rxdb`. If it has `import WatermelonClientDB from "mogobase/client-db/watermelon"`, install `@nozbe/watermelondb`.
+2. **You don't actually need offline mode but left a stale import in place.** Remove the `import` and the `clientDB={…}` prop. Online-only apps need neither package.
+
+## `<MogobaseProvider online={false}>` throws "requires a `clientDB` prop"
+
+Offline mode requires you to pass the backend singleton:
+
+```tsx
+import RxClientDB from "mogobase/client-db"
+<MogobaseProvider online={false} clientDB={RxClientDB} handlers={() => import("@/mogobase")}>
+```
+
+If you don't need offline at all, set `online={true}` (and skip `clientDB` + `handlers`).
+
+## Migrating from `offlineAdapter` (mogobase ≤ 2.5)
+
+The `offlineAdapter="rxdb" | "watermelon"` prop was removed in 2.6. Replace it with `clientDB` and an explicit import:
+
+```diff
+- import MogobaseProvider from "mogobase/provider"
++ import MogobaseProvider from "mogobase/provider"
++ import RxClientDB from "mogobase/client-db"
+
+  <MogobaseProvider
+    online={online}
+-   offlineAdapter="rxdb"
++   clientDB={RxClientDB}
+    handlers={() => import("@/mogobase")}
+  >
+```
+
+For watermelon, swap to `import WatermelonClientDB from "mogobase/client-db/watermelon"`. Online-only apps drop the `clientDB` line entirely and uninstall `rxdb` / `@nozbe/watermelondb` if present.
 
 ## Paginated query: doc changes aren't pushed
 

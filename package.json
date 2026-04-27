@@ -1,7 +1,7 @@
 {
   "name": "mogobase",
   "type": "module",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "description": "",
   "main": "lib/index.js",
   "types": "types/index.d.ts",
@@ -50,13 +50,17 @@
     "@nozbe/watermelondb": ">=0.28.0",
     "mongodb": ">=6.0.0",
     "next": ">=14",
-    "react": ">=18"
+    "react": ">=18",
+    "rxdb": ">=17.0.0"
   },
   "peerDependenciesMeta": {
     "@nozbe/watermelondb": {
       "optional": true
     },
     "next": {
+      "optional": true
+    },
+    "rxdb": {
       "optional": true
     }
   },
@@ -81,7 +85,6 @@
     "lodash.merge": "^4.6.2",
     "make-cli": "^6.0.0",
     "react": ">=18",
-    "rxdb": "^17.1.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "ws": "^8.20.0",
@@ -94,6 +97,7 @@
     "@types/react": "^19.2.8",
     "@types/ws": "^8.18.1",
     "mongodb": "^6.21.0",
+    "rxdb": "^17.1.0",
     "tsc-alias": "^1.8.16",
     "wrangler": "^4.4.0"
   }

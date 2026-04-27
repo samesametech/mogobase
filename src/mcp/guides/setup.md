@@ -15,13 +15,19 @@ yarn add mogobase ws
 yarn add -D @types/ws
 ```
 
-If you plan to use the **WatermelonDB** offline backend, also:
+For online-only apps, that's it — `rxdb` and `@nozbe/watermelondb` are both **optional peer dependencies**. Skip them entirely if you don't need offline mode.
+
+If you plan to use offline mode, install one backend:
 
 ```bash
+# RxDB backend (Dexie/IndexedDB) — default choice
+yarn add rxdb
+
+# OR WatermelonDB backend (LokiJS) — pick this for React Native or large local datasets
 yarn add @nozbe/watermelondb
 ```
 
-Otherwise the default RxDB backend works out of the box (it's a normal dependency of `mogobase`).
+Whichever you install, the consumer code imports its singleton from the matching subpath (`mogobase/client-db` or `mogobase/client-db/watermelon`) and passes it to the provider — see Step 5.
 
 ## Step 2 — Scaffold files
 
@@ -69,18 +75,32 @@ For split-origin or SSR deploys, also set `NEXT_MOGOBASE_URL` (or `MOGOBASE_URL`
 
 ## Step 5 — Wrap your app with MogobaseProvider
 
-In the root layout (or a client component mounted there):
+In the root layout (or a client component mounted there).
+
+**Online-only** — no offline backend installed:
 
 ```tsx
 "use client"
 import MogobaseProvider from "mogobase/provider"
 
 export default function Providers({ children }: { children: React.ReactNode }) {
+  return <MogobaseProvider online={true}>{children}</MogobaseProvider>
+}
+```
+
+**With offline mode** — import a backend singleton and pass it as `clientDB`:
+
+```tsx
+"use client"
+import MogobaseProvider from "mogobase/provider"
+import RxClientDB from "mogobase/client-db" // or "mogobase/client-db/watermelon"
+
+export default function Providers({ children }: { children: React.ReactNode }) {
   return (
     <MogobaseProvider
-      online={true}
+      online={true /* or a network-aware boolean */}
+      clientDB={RxClientDB}
       handlers={() => import("@/mogobase")}
-      offlineAdapter="rxdb"
     >
       {children}
     </MogobaseProvider>
@@ -88,9 +108,9 @@ export default function Providers({ children }: { children: React.ReactNode }) {
 }
 ```
 
-Then mount `<Providers>` inside `app/layout.tsx`. When `online={false}`, the provider lazy-loads the offline store and replays handler registrations into it.
+Then mount `<Providers>` inside `app/layout.tsx`. When `online={false}`, the provider connects `clientDB`, runs `handlers()` so handler registrations land in the runtime singleton, and replays `defineModel` calls against the local store.
 
-If the project only needs online mode, you can skip `handlers` and `offlineAdapter`.
+For online-only apps, skip the offline backend install, the `clientDB` prop, and `handlers` — the WebSocket path serves all queries and mutations.
 
 ## Step 6 — Add handlers
 

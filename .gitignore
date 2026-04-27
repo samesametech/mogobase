@@ -36,3 +36,4 @@ lerna-debug.log*
 
 .claude
 .playwright-mcp
+docs

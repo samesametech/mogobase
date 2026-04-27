@@ -1,10 +1,10 @@
 # mogobase
 
-A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive queries over WebSockets, Convex-style typed handlers, and **offline support** via RxDB or WatermelonDB.
+A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive queries over WebSockets, Convex-style typed handlers, and **opt-in offline support** via RxDB or WatermelonDB.
 
 - **Typed handlers** — define `query()` / `mutation()` with zod-validated args.
 - **Reactive queries** — `useQuery` and `usePaginatedQuery` both re-run their handlers on MongoDB change stream events. For `usePaginatedQuery` the server reuses the currently-loaded window as the effective limit so scroll position is preserved across refetches, and enrichments from joined collections (watched with additional `ctx.watch` calls) stay fresh.
-- **Offline mode** — same handlers run in the browser against RxDB/IndexedDB (default) or WatermelonDB/LokiJS when the app is offline. Toggle with `<MogobaseProvider online={...} offlineAdapter="rxdb" | "watermelon">`. Both backends sync writes across same-origin tabs via BroadcastChannel.
+- **Offline mode is opt-in** — same handlers run in the browser against RxDB/IndexedDB or WatermelonDB/LokiJS. The consumer imports the backend they want and passes it as `<MogobaseProvider clientDB={…}>`. Online-only apps install neither offline package — `rxdb` and `@nozbe/watermelondb` are both optional peer dependencies. Both backends sync writes across same-origin tabs via BroadcastChannel.
 - **One server** — a custom Next.js `server.ts` serves both your app and the mogobase WS endpoint.
 - **MongoDB-native** — thin wrapper around the official driver; no ORM, no schema lock-in.
 - **MCP server** — ships a Model Context Protocol server (`mogobase mcp`) that teaches AI assistants how to scaffold and extend a mogobase project.
@@ -15,6 +15,16 @@ A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive 
 yarn add mogobase ws
 yarn add -D @types/ws
 npx mogobase install
+```
+
+For offline mode, also install the backend you want — neither is needed for online-only apps:
+
+```bash
+# RxDB backend (Dexie/IndexedDB)
+yarn add rxdb
+
+# OR WatermelonDB backend (LokiJS)
+yarn add @nozbe/watermelondb
 ```
 
 `mogobase install` scaffolds the following into your Next.js project:
@@ -101,10 +111,25 @@ Use `internalQuery()` / `internalMutation()` for handlers that should only be ca
 
 ### 2. Wrap your app with `MogobaseProvider`
 
+**Online-only** (no offline backend installed):
+
 ```tsx
 // app/providers.tsx
 "use client"
 import { MogobaseProvider } from "mogobase/provider"
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  return <MogobaseProvider online={true}>{children}</MogobaseProvider>
+}
+```
+
+**Online + offline** (network-aware, with a backend the consumer imports):
+
+```tsx
+// app/providers.tsx
+"use client"
+import { MogobaseProvider } from "mogobase/provider"
+import RxClientDB from "mogobase/client-db" // or "mogobase/client-db/watermelon"
 import { useEffect, useState } from "react"
 
 export function Providers({ children }: { children: React.ReactNode }) {
@@ -121,22 +146,17 @@ export function Providers({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <MogobaseProvider online={online} handlers={() => import("@/mogobase")}>
+    <MogobaseProvider online={online} clientDB={RxClientDB} handlers={() => import("@/mogobase")}>
       {children}
     </MogobaseProvider>
   )
 }
 ```
 
-- `online={true}` — hooks talk to the server (WebSocket for queries, POST for mutations).
-- `online={false}` — handlers run in the browser against the selected offline backend. The chosen backend is **lazy-loaded**, so online-only consumers don't pay the bundle cost.
-- `offlineAdapter` — `"rxdb"` (default; RxDB + Dexie/IndexedDB) or `"watermelon"` (WatermelonDB + LokiJS/IncrementalIDB). Install the matching peer dep for whichever you pick — `rxdb` is bundled, `@nozbe/watermelondb` is an optional peer:
-  ```bash
-  # watermelon backend only
-  yarn add @nozbe/watermelondb
-  ```
-  Both backends expose the same Mongo-shaped `ctx.db.model(...)` surface, so handler code doesn't change.
-- `handlers` — an async loader that imports your `./mogobase` folder so handler registrations run on the client.
+- `online={true}` — hooks talk to the server (WebSocket for queries, POST for mutations). No `clientDB` needed.
+- `online={false}` — handlers run in the browser against `clientDB`. The provider throws a clear error if `clientDB` is missing in this mode.
+- `clientDB` — the singleton from `mogobase/client-db` (RxDB) or `mogobase/client-db/watermelon` (WatermelonDB). Whichever subpath you import is the only one that ends up in your bundle, and the matching peer package (`rxdb` or `@nozbe/watermelondb`) is the only one you need to install. Both backends expose the same Mongo-shaped `ctx.db.model(...)` surface, so handler code doesn't change.
+- `handlers` — async loader that imports your `./mogobase` folder so handler registrations run on the client. Required for offline mode; safe to omit for online-only.
 
 ### 3. Consume from React
 
@@ -196,8 +216,8 @@ yarn dev
 | `mogobase/provider`    | client         | `MogobaseProvider`, `useMogobase`                      |
 | `mogobase/server`      | server only    | Lower-level registration + `runQuery` / `runMutation`  |
 | `mogobase/db`          | server only    | `MogobaseDB` singleton and `Id` / `buildFilters`       |
-| `mogobase/client-db`   | client only    | RxDB-backed `ClientDB` (used internally by provider)   |
-| `mogobase/client-db/watermelon` | client only | WatermelonDB-backed `ClientDB` (used internally by provider) |
+| `mogobase/client-db`   | client only    | RxDB-backed `ClientDB` singleton — `import` and pass as `clientDB` prop. Requires `rxdb` peer dep. |
+| `mogobase/client-db/watermelon` | client only | WatermelonDB-backed `ClientDB` singleton — `import` and pass as `clientDB` prop. Requires `@nozbe/watermelondb` peer dep. |
 
 Prefer `mogobase/runtime` for anything that might run in the browser.
 

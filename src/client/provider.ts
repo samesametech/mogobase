@@ -1,13 +1,26 @@
 "use client"
-// <MogobaseProvider online handlers> — runtime flag + handler bootstrap for hooks.
+// <MogobaseProvider online clientDB handlers> — runtime flag + handler bootstrap for hooks.
 // Written with React.createElement to avoid JSX (tsconfig.jsxImportSource is hono/jsx).
 
 import * as React from "react"
 
+// Structural type for the offline client DB. Defined here so importing the type
+// does NOT pull rxdb / watermelon into the bundle. The concrete backend modules
+// (`mogobase/client-db`, `mogobase/client-db/watermelon`) export richer types
+// for consumers that want them.
+export type MogobaseClientDB = {
+  connect: (dbName?: string) => Promise<unknown>
+  defineModel: (name: string, schema?: unknown, indexes?: unknown) => Promise<unknown> | unknown
+  model: (name: string) => unknown
+  observeChanges: (name: string) => {
+    subscribe: (fn: () => void) => { unsubscribe: () => void }
+  }
+}
+
 export type MogobaseContextValue = {
   online: boolean
   ready: boolean
-  clientDB: any | null
+  clientDB: MogobaseClientDB | null
 }
 
 export const MogobaseContext = React.createContext<MogobaseContextValue | null>(null)
@@ -27,18 +40,18 @@ export type MogobaseProviderProps = {
   // Async loader that registers handlers on the runtime singleton. Typical:
   //   handlers={() => import("@/mogobase")}
   handlers?: () => Promise<unknown>
-  // Optional custom DB name for Dexie / LokiJS.
+  // Optional custom DB name for the offline store.
   dbName?: string
-  // Offline storage backend. Default "rxdb" (RxDB + Dexie). "watermelon" selects
-  // WatermelonDB + LokiJS — install @nozbe/watermelondb as a peer dep.
-  offlineAdapter?: "rxdb" | "watermelon"
+  // Required when online={false}. Import from "mogobase/client-db" (RxDB) or
+  // "mogobase/client-db/watermelon" (WatermelonDB) and pass the default export.
+  clientDB?: MogobaseClientDB
   children?: React.ReactNode
 }
 
 export function MogobaseProvider(props: MogobaseProviderProps): React.ReactElement {
-  const { online, handlers, dbName, offlineAdapter = "rxdb", children } = props
+  const { online, handlers, dbName, clientDB, children } = props
   const [ready, setReady] = React.useState<boolean>(online ? true : false)
-  const [clientDB, setClientDB] = React.useState<any | null>(null)
+  const [resolvedDB, setResolvedDB] = React.useState<MogobaseClientDB | null>(null)
 
   React.useEffect(() => {
     let cancelled = false
@@ -47,22 +60,22 @@ export function MogobaseProvider(props: MogobaseProviderProps): React.ReactEleme
         setReady(true)
         return
       }
-      // Lazy-load the chosen offline backend so online-only consumers don't
-      // ship it to the browser.
-      const mod =
-        offlineAdapter === "watermelon"
-          ? await import("./db/watermelon")
-          : await import("./db")
-      const ClientDB = (mod as any).default
-      await ClientDB.connect(dbName)
+      if (!clientDB) {
+        throw new Error(
+          "[mogobase] <MogobaseProvider online={false}> requires a `clientDB` prop. " +
+            "Import from 'mogobase/client-db' (RxDB) or 'mogobase/client-db/watermelon' " +
+            "and pass it as the prop."
+        )
+      }
+      await clientDB.connect(dbName)
       if (handlers) await handlers()
       // Apply any models registered via runtime.defineModel() in handler files.
       const { getModels } = await import("../runtime/models")
       for (const m of getModels()) {
-        await ClientDB.defineModel(m.name, m.schema, m.indexes)
+        await clientDB.defineModel(m.name, m.schema, m.indexes)
       }
       if (cancelled) return
-      setClientDB(ClientDB)
+      setResolvedDB(clientDB)
       setReady(true)
     }
     setReady(online ? true : false)
@@ -72,11 +85,11 @@ export function MogobaseProvider(props: MogobaseProviderProps): React.ReactEleme
     return () => {
       cancelled = true
     }
-  }, [online, handlers, dbName, offlineAdapter])
+  }, [online, handlers, dbName, clientDB])
 
   const value = React.useMemo<MogobaseContextValue>(
-    () => ({ online, ready, clientDB }),
-    [online, ready, clientDB]
+    () => ({ online, ready, clientDB: resolvedDB }),
+    [online, ready, resolvedDB]
   )
 
   return React.createElement(MogobaseContext.Provider, { value }, children)

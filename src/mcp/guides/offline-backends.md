@@ -2,11 +2,13 @@
 
 Both backends implement the same interface: `connect(dbName)`, `defineModel(name, schema?, indexes?)`, `model(name)`, `observeChanges(name)`, default-exported singleton.
 
+Both packages are **optional peer dependencies**. An online-only consumer installs neither. An offline consumer installs only the one they pass to `<MogobaseProvider clientDB={…}>`.
+
 Which to pick:
 
 | Concern | RxDB | WatermelonDB |
 |---|---|---|
-| Install | ✅ Already a dependency | ❌ Add `@nozbe/watermelondb` peer dep |
+| Install | `yarn add rxdb` | `yarn add @nozbe/watermelondb` |
 | Web (Dexie/IndexedDB) | ✅ | ✅ (via LokiJS) |
 | React Native | Possible (not tested) | ✅ Battle-tested |
 | Query DSL | Mongo-style filters natively | Mongo-style filters (evaluated in JS) |
@@ -15,23 +17,27 @@ Which to pick:
 | Bundle size | Larger | Smaller per table |
 | Writes | Per-document | Per-record, batched-capable |
 
-**Default**: RxDB. Only pick WatermelonDB when you need its strengths (React Native, very large local datasets).
+**Default**: RxDB. Pick WatermelonDB when you need its strengths (React Native, very large local datasets).
 
 ## Selecting the backend
 
-Pass `offlineAdapter` to the provider:
+Import the singleton from the matching subpath and pass it as the `clientDB` prop:
 
 ```tsx
-<MogobaseProvider online={false} offlineAdapter="rxdb" handlers={() => import("@/mogobase")}>
+import RxClientDB from "mogobase/client-db"
+
+<MogobaseProvider online={false} clientDB={RxClientDB} handlers={() => import("@/mogobase")}>
 ```
 
 or
 
 ```tsx
-<MogobaseProvider online={false} offlineAdapter="watermelon" handlers={() => import("@/mogobase")}>
+import WatermelonClientDB from "mogobase/client-db/watermelon"
+
+<MogobaseProvider online={false} clientDB={WatermelonClientDB} handlers={() => import("@/mogobase")}>
 ```
 
-The backend is lazy-imported — only the selected one ships to the browser.
+Only the subpath you import lands in your bundle. The provider itself contains no references to either backend, so an online-only `<MogobaseProvider online={true}>` ships zero offline code.
 
 ## RxDB specifics
 
@@ -39,6 +45,7 @@ The backend is lazy-imported — only the selected one ships to the browser.
 - Schemas: RxDB schema is derived from your zod schema. Models with no schema default to a permissive shape.
 - `observeChanges(name)` wraps RxDB's `collection.$` — fires on every change event including the initial snapshot.
 - `defineModel` is idempotent; safe under React strict-mode double-mount.
+- Peer dep: `rxdb` (>=17.0.0).
 
 ## WatermelonDB specifics
 
@@ -47,6 +54,7 @@ The backend is lazy-imported — only the selected one ships to the browser.
 - `observeChanges(name)` wraps `Database.withChangesForTables([name])` and **skips the replay-on-subscribe emission** so `useQuery` doesn't loop on mount.
 - **All `defineModel` calls must run before the DB is first accessed.** `defineModel` throws if called after `_ensureDb()` for an unknown model. It's idempotent for already-registered models (safe under strict-mode).
 - Practical implication: register all models in `./mogobase/*.ts` at module scope (the normal pattern) and you're fine. Do not lazy-add models after the first `useQuery`.
+- Peer dep: `@nozbe/watermelondb` (>=0.28.0).
 
 ## Cross-tab sync
 
@@ -75,4 +83,4 @@ Both adapters expose Mongo-shaped filter methods (`find`, `findOne`, `insertOne`
 
 ## When offline is over-engineered
 
-If your app doesn't need offline reads/writes, set `online={true}` and skip `handlers` + `offlineAdapter`. Nothing offline ships to the browser. You still get `useQuery` / `useMutation` / live queries — just no local store.
+If your app doesn't need offline reads/writes, set `online={true}` and skip both `clientDB` and `handlers`. Nothing offline ships to the browser, and you don't install `rxdb` or `@nozbe/watermelondb` at all. You still get `useQuery` / `useMutation` / live queries — just no local store.
