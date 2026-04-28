@@ -224,10 +224,13 @@ export async function startRxSync(db: RxDatabase, options: SyncOptions = {}): Pr
             batchSize: batch,
           })
           if (!sent) {
-            // Drop the queued listener since the WS isn't open.
+            // WS isn't open. Drop the queued listener and throw so RxDB
+            // retries on its next live tick / RESYNC instead of advancing
+            // its checkpoint as if the pull had succeeded.
             const q = pendingPulls.get(model)
             if (q?.length) q.pop()
-            return { documents: [], checkpoint: checkpointOrNull }
+            setStatus("error")
+            throw new Error("sync-pull: WebSocket not open")
           }
           const rs = await pending
           setStatus("live")
@@ -251,9 +254,14 @@ export async function startRxSync(db: RxDatabase, options: SyncOptions = {}): Pr
             })),
           })
           if (!sent) {
+            // WS isn't open. Returning [] would tell RxDB the batch was
+            // pushed successfully and the local rows would be marked clean,
+            // silently dropping offline edits. Throw so RxDB keeps the rows
+            // dirty and retries after retryTime.
             const q = pendingPushes.get(model)
             if (q?.length) q.pop()
-            return [] // RxDB retries on next live tick
+            setStatus("error")
+            throw new Error("sync-push: WebSocket not open")
           }
           const rs = await pending
           setStatus("live")
