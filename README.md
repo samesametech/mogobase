@@ -1,10 +1,11 @@
 # mogobase
 
-A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive queries over WebSockets, Convex-style typed handlers, and **opt-in offline support** via RxDB or WatermelonDB.
+A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive queries over WebSockets, Convex-style typed handlers, **opt-in offline support** via RxDB or WatermelonDB, and **opt-in local-first sync** that keeps the client store and MongoDB continuously replicated.
 
 - **Typed handlers** — define `query()` / `mutation()` with zod-validated args.
 - **Reactive queries** — `useQuery` and `usePaginatedQuery` both re-run their handlers on MongoDB change stream events. For `usePaginatedQuery` the server reuses the currently-loaded window as the effective limit so scroll position is preserved across refetches, and enrichments from joined collections (watched with additional `ctx.watch` calls) stay fresh.
 - **Offline mode is opt-in** — same handlers run in the browser against RxDB/IndexedDB or WatermelonDB/LokiJS. The consumer imports the backend they want and passes it as `<MogobaseProvider clientDB={…}>`. Online-only apps install neither offline package — `rxdb` and `@nozbe/watermelondb` are both optional peer dependencies. Both backends sync writes across same-origin tabs via BroadcastChannel.
+- **Local-first sync is opt-in** — turn on `sync={true}` and the same hooks read/write through `clientDB` while a background engine continuously replicates with MongoDB over the existing `/ws` connection. Writes pushed up; server changes streamed down; offline writes queue locally and replay when the WS reconnects.
 - **One server** — a custom Next.js `server.ts` serves both your app and the mogobase WS endpoint.
 - **MongoDB-native** — thin wrapper around the official driver; no ORM, no schema lock-in.
 - **MCP server** — ships a Model Context Protocol server (`mogobase mcp`) that teaches AI assistants how to scaffold and extend a mogobase project.
@@ -31,6 +32,7 @@ yarn add @nozbe/watermelondb
 
 - `hooks/useQuery.ts`, `hooks/useMutation.ts`, `hooks/usePaginatedQuery.ts`, `hooks/index.ts`
 - `src/app/api/handlers/route.ts` (or `app/api/handlers/route.ts` if `src/` is absent)
+- `src/app/api/sync/route.ts` — HTTP-fallback for sync mode (harmless if you don't use sync)
 - `server.ts` at the project root
 - `mogobase/` folder for your handler files
 
@@ -155,8 +157,54 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
 - `online={true}` — hooks talk to the server (WebSocket for queries, POST for mutations). No `clientDB` needed.
 - `online={false}` — handlers run in the browser against `clientDB`. The provider throws a clear error if `clientDB` is missing in this mode.
+- `online={true}` + `sync={true}` — local-first. Hooks read/write through `clientDB` and a background engine continuously replicates with MongoDB. See the next section.
 - `clientDB` — the singleton from `mogobase/client-db` (RxDB) or `mogobase/client-db/watermelon` (WatermelonDB). Whichever subpath you import is the only one that ends up in your bundle, and the matching peer package (`rxdb` or `@nozbe/watermelondb`) is the only one you need to install. Both backends expose the same Mongo-shaped `ctx.db.model(...)` surface, so handler code doesn't change.
-- `handlers` — async loader that imports your `./mogobase` folder so handler registrations run on the client. Required for offline mode; safe to omit for online-only.
+- `handlers` — async loader that imports your `./mogobase` folder so handler registrations run on the client. Required for offline and sync modes; safe to omit for online-only.
+
+#### Local-first sync mode
+
+Add `sync={true}` (with `online={true}`) and the same hooks become local-first: every read hits `clientDB`, every write lands locally first and is then pushed to MongoDB. Server changes flow back down through the same `/ws` connection.
+
+```tsx
+// app/providers.tsx
+"use client"
+import { MogobaseProvider } from "mogobase/provider"
+import RxClientDB from "mogobase/client-db" // or "mogobase/client-db/watermelon"
+import { useMemo } from "react"
+
+const SYNC_OPTIONS = { batchSize: 200 }
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  const syncOptions = useMemo(() => SYNC_OPTIONS, [])
+  return (
+    <MogobaseProvider
+      online={true}
+      sync={true}
+      clientDB={RxClientDB}
+      dbName="my-app"
+      handlers={() => import("@/mogobase")}
+      syncOptions={syncOptions}
+    >
+      {children}
+    </MogobaseProvider>
+  )
+}
+```
+
+What you get:
+
+- Reads are instant (served from IndexedDB / LokiJS).
+- Writes don't wait for the network — they replay automatically when the WS reconnects.
+- Server changes from other clients land within ~3s via a `sync-stream` event that re-pulls.
+- `createdAt` / `updatedAt` / `deletedAt` are auto-injected into every model schema and auto-stamped on every write — handler authors don't have to declare or update them. Timestamps are numeric ms (`Date.now()`).
+- Soft-deletes propagate (`deleteOne` is rewritten to `$set: {deletedAt, updatedAt}` so the sync checkpoint can carry tombstones). Reach through to the underlying driver if you really need a hard delete.
+
+Caveats:
+
+- `_id` must be a string. Sync mode collections are incompatible with existing `ObjectId` `_id`s.
+- Memoize `syncOptions` (or define at module scope). It's in the provider's effect dep array — an inline `{}` will tear down and restart sync on every render.
+- WatermelonDB does a full pull per cycle; for >10K records per model the initial sync is slow. RxDB doesn't have this limitation.
+- See `mogobase://guide/sync` (MCP) for the wire protocol, conflict resolution defaults, and the full list of edge cases.
 
 ### 3. Consume from React
 
@@ -189,7 +237,7 @@ export default function Tasks() {
 }
 ```
 
-The hooks branch on the provider's `online` flag: online they use WebSocket + HTTP, offline they run the same handlers against the selected offline backend (RxDB or WatermelonDB) and subscribe to local change events via `clientDB.observeChanges(name)`. Your component code doesn't change.
+The hooks branch on the provider's `online` and `sync` flags: pure-online they use WebSocket + HTTP; offline (or local-first sync) they run the same handlers against the selected backend (RxDB or WatermelonDB) and subscribe to local change events via `clientDB.observeChanges(name)`. Your component code doesn't change.
 
 ### 4. Run it
 
@@ -215,6 +263,8 @@ yarn dev
 | `mogobase/runtime`     | handler files  | Isomorphic `query`, `mutation`, `defineModel`, `v`     |
 | `mogobase/provider`    | client         | `MogobaseProvider`, `useMogobase`                      |
 | `mogobase/server`      | server only    | Lower-level registration + `runQuery` / `runMutation`  |
+| `mogobase/server/sync` | server only    | `pullChanges`, `pushChanges`, `streamChanges` for the `/api/sync` HTTP fallback or custom transports |
+| `mogobase/sync-types`  | isomorphic     | Wire-protocol types: `SyncDoc`, `SyncOptions`, `SyncHandle` |
 | `mogobase/db`          | server only    | `MogobaseDB` singleton and `Id` / `buildFilters`       |
 | `mogobase/client-db`   | client only    | RxDB-backed `ClientDB` singleton — `import` and pass as `clientDB` prop. Requires `rxdb` peer dep. |
 | `mogobase/client-db/watermelon` | client only | WatermelonDB-backed `ClientDB` singleton — `import` and pass as `clientDB` prop. Requires `@nozbe/watermelondb` peer dep. |
@@ -279,6 +329,7 @@ Guides are served as `mogobase://guide/<slug>` (markdown). Clients can read them
 | `mogobase://guide/hooks` | `useQuery`, `useMutation`, `usePaginatedQuery` usage and transport model. |
 | `mogobase://guide/provider` | Wrapping the app, online/offline flag, handlers loader, boot sequence. |
 | `mogobase://guide/offline-backends` | RxDB vs WatermelonDB — when to pick each, caveats, interface. |
+| `mogobase://guide/sync` | Local-first sync mode: enabling, wire protocol, `updatedAt` semantics, conflict resolution, soft-delete propagation, known limitations. |
 | `mogobase://guide/troubleshooting` | Common errors: WS not connecting, handlers not registering, offline gotchas. |
 
 ### Prompts
