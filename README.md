@@ -204,6 +204,7 @@ Caveats:
 - `_id` must be a string. Sync mode collections are incompatible with existing `ObjectId` `_id`s.
 - Memoize `syncOptions` (or define at module scope). It's in the provider's effect dep array — an inline `{}` will tear down and restart sync on every render.
 - WatermelonDB does a full pull per cycle; for >10K records per model the initial sync is slow. RxDB doesn't have this limitation.
+- For paginated queries that must work in both modes (server-side Mongo and client-side adapter), use the runtime helpers `isServer()` + `MongoPaging` to dispatch between `mongo-cursor-pagination` (server) and the browser-safe polyfill (client). See `mogobase://guide/handlers` → "Isomorphic handlers".
 - See `mogobase://guide/sync` (MCP) for the wire protocol, conflict resolution defaults, and the full list of edge cases.
 
 ### 3. Consume from React
@@ -260,7 +261,7 @@ yarn dev
 
 | Import                 | Use from       | Purpose                                                |
 | ---------------------- | -------------- | ------------------------------------------------------ |
-| `mogobase/runtime`     | handler files  | Isomorphic `query`, `mutation`, `defineModel`, `v`     |
+| `mogobase/runtime`     | handler files  | Isomorphic `query`, `mutation`, `defineModel`, `v`, `isServer`, `isClient`, `MongoPaging` (browser-safe polyfill of `mongo-cursor-pagination`) |
 | `mogobase/provider`    | client         | `MogobaseProvider`, `useMogobase`                      |
 | `mogobase/server`      | server only    | Lower-level registration + `runQuery` / `runMutation`  |
 | `mogobase/server/sync` | server only    | `pullChanges`, `pushChanges`, `streamChanges` for the `/api/sync` HTTP fallback or custom transports |

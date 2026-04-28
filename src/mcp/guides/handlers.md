@@ -113,6 +113,10 @@ mutation("publishPost", {
 
 Use the exported `PaginationQueryArgs` helper for cursor-based args — pairs with `usePaginatedQuery` on the client. The return shape must match `{ results, hasNext, hasPrevious, next, previous }` (the contract of `mongo-cursor-pagination`).
 
+### Online-only handlers
+
+If the handler is only ever exercised on the server (pure `online={true}` apps), import `mongo-cursor-pagination` directly:
+
 ```ts
 import { query, v, PaginationQueryArgs } from "mogobase/runtime"
 import MongoPaging from "mongo-cursor-pagination"
@@ -131,16 +135,47 @@ query("listPosts", {
     return await MongoPaging.find(db.model("posts").collection, {
       query: filter,
       paginatedField: "_id",
-      limit: args.paginationOpts.limit,
-      sortAscending: args.paginationOpts.sortAscending,
-      next: args.paginationOpts.next,
-      previous: args.paginationOpts.previous,
+      ...args.paginationOpts,
     })
   },
 })
 ```
 
-The handler hardcodes `paginatedField: "_id"` in the `MongoPaging.find` call — that is the source of truth for the sort field on the server. `PaginationQueryArgs` exposes an optional `paginatedField` in the schema and `usePaginatedQuery` accepts one as a hook option, but both are ignored unless the handler explicitly reads `args.paginationOpts.paginatedField` and forwards it to `MongoPaging.find`. Pick one field per handler and stick with it.
+### Isomorphic handlers (sync / offline mode)
+
+Handlers that run on both server (real Mongo) and client (RxDB / WatermelonDB adapter) — i.e. anything in offline mode or `online={true} sync={true}` mode — can't use `mongo-cursor-pagination` directly: the package depends on Node-only Mongo internals and BSON. Mogobase ships a browser-safe polyfill of `MongoPaging.find` from `mogobase/runtime`. Dispatch on `isServer()`:
+
+```ts
+import {
+  query, v, PaginationQueryArgs,
+  isServer, MongoPaging as MongoPagingPolyfill,
+} from "mogobase/runtime"
+import MongoPaging from "mongo-cursor-pagination"
+
+const Pager: { find: (col: any, params: any) => Promise<any> } =
+  isServer() ? (MongoPaging as any) : MongoPagingPolyfill
+
+query("listPosts", {
+  args: v.object({ filter: v.any(), paginationOpts: PaginationQueryArgs }),
+  handler: async ({ filter, paginationOpts }, { db, watch }) => {
+    watch("posts")
+    return Pager.find(db.model("posts"), {
+      query: { ...filter, deletedAt: null },
+      paginatedField: "_id",
+      ...paginationOpts,
+    })
+  },
+})
+```
+
+Behavior of the polyfill:
+
+- Operates on any `find(filter).toArray()`-shaped collection — both `RxMongoAdapter` and `WatermelonMongoAdapter` qualify.
+- Returns the same `{ results, previous, next, hasPrevious, hasNext }` shape as upstream.
+- Cursor tokens are `base64url(JSON.stringify(value))`. Tokens issued by the server (BSON-encoded EJSON) and the polyfill (plain JSON) are **not interchangeable** within a single paginated query — but each side stays consistent within its own page sequence, which is what the hook needs.
+- Pulls the full matched set into memory then sorts/filters/slices in JS. Adequate for the per-user datasets typical in offline / sync flows; do not use the polyfill on the server against million-row collections.
+
+The handler hardcodes `paginatedField: "_id"` — that is the source of truth for the sort field. `PaginationQueryArgs` exposes an optional `paginatedField` in the schema and `usePaginatedQuery` accepts one as a hook option, but both are ignored unless the handler explicitly reads `args.paginationOpts.paginatedField` and forwards it. Pick one field per handler and stick with it.
 
 If the handler enriches rows from other collections (e.g., `post.category`), call `ctx.watch("categories")` too — every watched collection triggers a full refetch on change, so category-name edits propagate into the rendered posts.
 

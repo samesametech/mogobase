@@ -44,6 +44,20 @@ There are no tests or linters configured. Do not add CI/lint/test tooling withou
 
 - `defineModel(name, schema?, indexes?)` runs `withSyncFields(schema)` before storing the def. `withSyncFields` merges `{createdAt: v.number(), updatedAt: v.number(), deletedAt: v.number().nullable()}` into either a `ZodObject` (via `.extend`) or a plain shape object — sync timestamp fields **always override** any consumer-defined versions of those keys. Schema-less models receive just the three sync fields. This is what guarantees that handler authors don't have to declare timestamps and that the RxDB JSON-schema generator + WatermelonDB JSON-blob both see numeric timestamps for every model.
 
+### Runtime helpers (`src/runtime/env.ts`, `src/runtime/paging.ts`)
+
+- `env.ts` — `isServer()` / `isClient()` based on `typeof window === "undefined"`. Used by isomorphic handlers to dispatch on runtime; `isServer()` is true in Node (Next.js custom server, route handler workers, SSR) and false in any browser context.
+- `paging.ts` — browser-safe polyfill of `mongo-cursor-pagination`'s default-exported `MongoPaging.find(col, params)`. Operates on any `find(filter).toArray()`-shaped collection (`RxMongoAdapter`, `WatermelonMongoAdapter`). Pulls the full matched set, then sorts/filters/slices in JS — adequate for per-user offline / sync datasets, not for million-row server queries. Same return shape as upstream (`{results, previous, next, hasPrevious, hasNext}`); cursor tokens are `base64url(JSON.stringify(value))` (plain JSON, not BSON-EJSON), with the standard `_id`-cursor → encoded value, non-`_id` cursor → `[fieldValue, _id]` shape. Supports `paginatedField`, `sortAscending`, `sortCaseInsensitive`, `next` / `previous`, `fields` projection, dotted-path field access. Mirrors upstream's `prepareResponse` semantics for `hasPrevious` / `hasNext`. The `find` function is exported both via `export const MongoPaging = { find }` and `export default MongoPaging` so handlers can use either named or default-import patterns. **Polyfill cursors and upstream BSON-EJSON cursors are not interchangeable**, but each side stays consistent within its own page sequence — which is all the hook needs.
+
+Both helpers are re-exported from `mogobase/runtime`. The intended pattern for paginated handlers that run in both modes is:
+
+```ts
+import { isServer, MongoPaging as MongoPagingPolyfill } from "mogobase/runtime"
+import MongoPaging from "mongo-cursor-pagination"
+const Pager = isServer() ? (MongoPaging as any) : MongoPagingPolyfill
+return Pager.find(ctx.db.model(name), { query, paginatedField: "_id", ...paginationOpts })
+```
+
 ### Client (`src/client/`)
 
 - `hooks/` — React hooks (`useQuery`, `useMutation`, `usePaginatedQuery`). The routing rule across all three: `if (online && !sync) → WS/HTTP`; `else if (ready && clientDB) → run handler against clientDB and re-run on clientDB.observeChanges(name)`. The fallback branch is reused for both `online={false}` and `online && sync` — same `runQuery` / `runMutation` from `mogobase/server` (pure, browser-safe). The hooks never import any backend module — they read `clientDB` and `sync` from React context. URLs are same-origin (derived from `window.location`), with `NEXT_MOGOBASE_URL` / `MOGOBASE_URL` env override for SSR or split-origin deploys. Also compiled into `lib/` and re-exported from the package root.

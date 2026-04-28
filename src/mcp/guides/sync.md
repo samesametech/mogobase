@@ -140,6 +140,27 @@ const syncOptions = useMemo(() => ({ batchSize: 500 }), [])
 
 …or define at module scope.
 
+## Pagination in sync handlers
+
+Sync-mode handlers run on both server (real Mongo) and client (RxDB / WatermelonDB adapter). Server-side pagination via `mongo-cursor-pagination` doesn't run in the browser — it depends on Node-only Mongo internals. `mogobase/runtime` ships two helpers for this case:
+
+- `isServer()` — `typeof window === "undefined"` runtime check.
+- `MongoPaging` — browser-safe polyfill of `mongo-cursor-pagination`'s `MongoPaging.find(col, params)`. Same return shape; cursor tokens are `base64url(JSON.stringify(value))`. Works against any `find(filter).toArray()`-shaped collection.
+
+Pattern:
+
+```ts
+import {
+  query, v, PaginationQueryArgs,
+  isServer, MongoPaging as MongoPagingPolyfill,
+} from "mogobase/runtime"
+import MongoPaging from "mongo-cursor-pagination"
+
+const Pager = isServer() ? (MongoPaging as any) : MongoPagingPolyfill
+```
+
+See `mogobase://guide/handlers` ("Isomorphic handlers") for the full example.
+
 ## Edge cases
 
 - **`_id` must be string**: client UUIDs are produced via `crypto.randomUUID()`.
