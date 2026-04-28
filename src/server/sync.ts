@@ -122,13 +122,22 @@ export async function pushChanges(args: {
 
     if (existing) {
       const existingTs = pickEffectiveTimestamp(existing)
-      const assumedTs = row.assumedMasterState
-        ? pickEffectiveTimestamp(row.assumedMasterState)
-        : 0
-      if (existingTs > assumedTs) {
-        // Server is ahead — return the server's version as a conflict.
-        conflicts.push(toSyncDoc(existing))
-        continue
+      if (row.assumedMasterState) {
+        const assumedTs = pickEffectiveTimestamp(row.assumedMasterState)
+        if (existingTs > assumedTs) {
+          // Server is ahead — return the server's version as a conflict.
+          conflicts.push(toSyncDoc(existing))
+          continue
+        }
+      } else {
+        // No optimistic-concurrency token from the client (e.g. WatermelonDB
+        // adapter). Fall back to plain last-writer-wins by client clock:
+        // apply only if the client's updatedAt is newer than the server's.
+        const incomingTs = pickEffectiveTimestamp(next)
+        if (existingTs > incomingTs) {
+          conflicts.push(toSyncDoc(existing))
+          continue
+        }
       }
     }
 
