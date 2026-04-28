@@ -22,6 +22,7 @@ import { appSchema, tableSchema } from "@nozbe/watermelondb"
 import type { IndexDescription, CreateIndexesOptions } from "mongodb"
 
 import { WatermelonMongoAdapter } from "./adapter"
+import type { SyncHandle, SyncOptions } from "@/client/sync-types"
 
 type ModelDef = { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions } }
 
@@ -91,7 +92,7 @@ export class MogobaseWatermelonDB {
         name,
         columns: [
           { name: "data", type: "string" },
-          { name: "deleted_at", type: "string", isOptional: true, isIndexed: true },
+          { name: "deleted_at", type: "number", isOptional: true, isIndexed: true },
         ],
       })
     )
@@ -163,6 +164,25 @@ export class MogobaseWatermelonDB {
         })
         return { unsubscribe: () => sub.unsubscribe() }
       },
+    }
+  }
+
+  _syncHandle: SyncHandle | null = null
+
+  async startSync(options: SyncOptions = {}): Promise<SyncHandle> {
+    const wdb = this._ensureDb()
+    if (this._syncHandle) return this._syncHandle
+    const { startWatermelonSync } = await import("./sync")
+    this._syncHandle = await startWatermelonSync(wdb, options)
+    return this._syncHandle
+  }
+
+  async stopSync(): Promise<void> {
+    if (!this._syncHandle) return
+    try {
+      await this._syncHandle.cancel()
+    } finally {
+      this._syncHandle = null
     }
   }
 

@@ -44,7 +44,7 @@ type PaginationData = {
 }
 
 function usePaginatedQuery(name: string, args?: any, paginationData: PaginationData = { pageSize: 10 }) {
-  const { online, ready, clientDB } = useMogobase()
+  const { online, sync, ready, clientDB } = useMogobase()
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState<boolean>(false)
   const [hasNext, setHasNext] = useState<boolean>(false)
@@ -74,7 +74,7 @@ function usePaginatedQuery(name: string, args?: any, paginationData: PaginationD
 
   useEffect(() => {
     if (argsKey === "skip") return
-    if (online) {
+    if (online && !sync) {
       const wsLocal = new WebSocket(wsUrl())
       ws.current = wsLocal
       setLoading(true)
@@ -216,23 +216,23 @@ function usePaginatedQuery(name: string, args?: any, paginationData: PaginationD
       setHasPrevious(false)
       setLoading(false)
     }
-  }, [online, ready, name, argsKey, paginationData.pageSize, sortAscending, paginationData.sortCaseInsensitive])
+  }, [online, sync, ready, name, argsKey, paginationData.pageSize, sortAscending, paginationData.sortCaseInsensitive])
 
   const loadNext = useCallback(() => {
-    if (!online) {
+    if (!online || sync) {
       if (offlineNextRef.current) offlineRunRef.current?.("next")
       return
     }
     if (hasNext) sendLoadNext()
-  }, [online, hasNext, sendLoadNext])
+  }, [online, sync, hasNext, sendLoadNext])
 
   const loadPrevious = useCallback(() => {
-    if (!online) {
+    if (!online || sync) {
       if (offlinePrevRef.current) offlineRunRef.current?.("previous")
       return
     }
     if (hasPrevious) sendLoadPrevious()
-  }, [online, hasPrevious, sendLoadPrevious])
+  }, [online, sync, hasPrevious, sendLoadPrevious])
 
   return {
     results: data,

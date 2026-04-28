@@ -5,10 +5,10 @@ const apiBase = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL || ""
 const apiUrl = `${apiBase}/api/handlers`
 
 function useMutation(name: string) {
-  const { online, clientDB } = useMogobase()
+  const { online, sync, clientDB } = useMogobase()
 
   return async (args?: any) => {
-    if (online) {
+    if (online && !sync) {
       const rs = await fetch(apiUrl, {
         method: "POST",
         credentials: "include",
@@ -17,7 +17,7 @@ function useMutation(name: string) {
       })
       return await rs.json()
     }
-    if (!clientDB) throw new Error("[mogobase] offline client DB not ready")
+    if (!clientDB) throw new Error("[mogobase] client DB not ready")
     return await runMutation(name, args, { db: clientDB })
   }
 }

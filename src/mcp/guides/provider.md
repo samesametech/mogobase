@@ -15,7 +15,9 @@ import MogobaseProvider, { useMogobase } from "mogobase/provider"
 | `online` | `boolean` (required) | When `true`, hooks use HTTP + WebSocket. When `false`, hooks run handlers against `clientDB`. |
 | `handlers` | `() => Promise<unknown>` | Async loader that triggers handler registration. Typically `() => import("@/mogobase")`. Required for offline mode; optional for online (the server already loaded handlers). |
 | `dbName` | `string` | Custom DB name for the offline store. Defaults to backend-specific default. |
-| `clientDB` | `MogobaseClientDB` | **Required when `online={false}`.** The offline-store singleton — import from `mogobase/client-db` (RxDB) or `mogobase/client-db/watermelon` (WatermelonDB) and pass the default export. The provider holds zero references to either backend module, so consumers that never pass `clientDB` ship neither package's code. |
+| `clientDB` | `MogobaseClientDB` | **Required when `online={false}` OR when `sync={true}`.** The offline-store singleton — import from `mogobase/client-db` (RxDB) or `mogobase/client-db/watermelon` (WatermelonDB) and pass the default export. The provider holds zero references to either backend module, so consumers that never pass `clientDB` ship neither package's code. |
+| `sync` | `boolean` | When `true` (and `online={true}`), enables local-first mode: hooks always go through `clientDB`, and a background engine continuously replicates between `clientDB` and the server. See the **Sync Mode (Local-First)** guide for the full wire protocol and limitations. |
+| `syncOptions` | `SyncOptions` | Configuration for the sync engine: `wsUrl`, `getAuth`, `models`, `conflictResolver`, `batchSize`. **Memoize this object** — it's part of the boot effect's dep array and an inline `{}` will tear down + restart sync on every render. |
 
 ## Online-only setup
 
@@ -102,6 +104,34 @@ export default function Providers({ children }: { children: React.ReactNode }) {
 ```
 
 Install: `yarn add @nozbe/watermelondb`.
+
+## Local-first with continuous sync
+
+```tsx
+"use client"
+import MogobaseProvider from "mogobase/provider"
+import RxClientDB from "mogobase/client-db"
+
+const syncOptions = {} // module-scope — must be a stable reference
+
+export default function Providers({ children }: { children: React.ReactNode }) {
+  return (
+    <MogobaseProvider
+      online={true}
+      sync={true}
+      clientDB={RxClientDB}
+      syncOptions={syncOptions}
+      handlers={() => import("@/mogobase")}
+    >
+      {children}
+    </MogobaseProvider>
+  )
+}
+```
+
+Reads always come from the local store; writes are forwarded to MongoDB
+asynchronously, and server changes are pushed back live. See the **Sync Mode**
+guide for the wire protocol, conflict resolution, and known limitations.
 
 ## Boot sequence
 

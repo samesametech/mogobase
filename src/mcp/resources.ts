@@ -13,6 +13,7 @@ const GUIDES: Guide[] = [
   { slug: "hooks", title: "React Hooks", description: "useQuery, useMutation, usePaginatedQuery — usage and transport model." },
   { slug: "provider", title: "MogobaseProvider", description: "Wrapping the app, online/offline flag, handlers loader, boot sequence." },
   { slug: "offline-backends", title: "Offline Backends", description: "RxDB vs WatermelonDB — when to pick each, caveats, interface." },
+  { slug: "sync", title: "Sync Mode (Local-First)", description: "Enabling sync, wire protocol, updatedAt semantics, conflict resolution, limitations." },
   { slug: "troubleshooting", title: "Troubleshooting", description: "Common errors: WS not connecting, handlers not registering, offline gotchas." },
 ]
 

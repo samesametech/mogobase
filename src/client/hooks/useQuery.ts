@@ -22,7 +22,7 @@ function safeCloseWS(ws: WebSocket | null | undefined) {
 }
 
 function useQuery(name: string, args?: any) {
-  const { online, ready, clientDB } = useMogobase()
+  const { online, sync, ready, clientDB } = useMogobase()
   const [data, setData] = useState<any>(undefined)
 
   const argsKey = typeof args === "object" ? JSON.stringify(args) : args
@@ -30,7 +30,7 @@ function useQuery(name: string, args?: any) {
   useEffect(() => {
     setData(undefined)
     if (argsKey === "skip") return
-    if (online) {
+    if (online && !sync) {
       const ws = new WebSocket(wsUrl())
 
       ws.addEventListener("open", () => {
@@ -96,7 +96,7 @@ function useQuery(name: string, args?: any) {
       for (const s of subs) s.unsubscribe()
       setData(undefined)
     }
-  }, [online, ready, name, argsKey])
+  }, [online, sync, ready, name, argsKey])
 
   return data
 }

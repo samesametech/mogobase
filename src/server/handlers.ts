@@ -2,6 +2,7 @@ import z4 from "zod/v4"
 
 import type { MogobaseDB } from "@/db"
 import type { ChangeStreamOptions, Document } from "mongodb"
+import { wrapDbWithAutoStamp } from "@/server/autoStamp"
 
 export type WatchOptions = ChangeStreamOptions & {
   paginatedField?: string
@@ -109,9 +110,10 @@ class Handlers {
     if (!ctx.db) throw new Error("ctx.db is required — pass the mogobase/db or mogobase/client-db instance")
     const validated = await handler.args.safeParseAsync(args ?? {})
     if (validated.success) {
+      const wrappedDb = wrapDbWithAutoStamp(ctx.db)
       return await handler.handler(validated.data, {
         headers: ctx.headers || null,
-        db: ctx.db,
+        db: wrappedDb,
         runQuery: (n, a, c) => this._runQuery(n, a, { db: ctx.db, headers: ctx.headers, ...(c || {}) }),
         runMutation: (n, a, c) => this._runMutation(n, a, { db: ctx.db, headers: ctx.headers, ...(c || {}) }),
       })

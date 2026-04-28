@@ -11,6 +11,7 @@ import type z4 from "zod/v4"
 import type { IndexDescription, CreateIndexesOptions } from "mongodb"
 
 import { RxMongoAdapter } from "./adapter"
+import type { SyncHandle, SyncOptions } from "@/client/sync-types"
 
 addRxPlugin(RxDBQueryBuilderPlugin)
 addRxPlugin(RxDBUpdatePlugin)
@@ -49,11 +50,15 @@ function zodToRxJsonSchema(name: string, schemaInput: any, indexes?: ModelDef["i
   const base = json?.type === "object" ? json : { type: "object", properties: {}, required: [] }
 
   const properties = {
-    _id: { type: "string", maxLength: 100 },
-    deletedAt: { type: ["string", "null"] },
     ...(base.properties || {}),
+    _id: { type: "string", maxLength: 100 },
+    deletedAt: { type: ["number", "null"], minimum: 0, maximum: 8640000000000000, multipleOf: 1 },
+    updatedAt: { type: "number", minimum: 0, maximum: 8640000000000000, multipleOf: 1 },
+    createdAt: { type: "number", minimum: 0, maximum: 8640000000000000, multipleOf: 1 },
   }
-  const required = Array.from(new Set<string>([...(base.required || []), "_id"]))
+  const required = Array.from(
+    new Set<string>([...(base.required || []), "_id", "updatedAt", "deletedAt", "createdAt"])
+  )
 
   const rxIndexes: string[][] = []
   if (indexes?.indexSpecs) {
@@ -65,6 +70,9 @@ function zodToRxJsonSchema(name: string, schemaInput: any, indexes?: ModelDef["i
       else rxIndexes.push(fields)
     }
   }
+  // Sync-mode indexes — required for the pull cursor and soft-delete propagation.
+  rxIndexes.push(["updatedAt"])
+  rxIndexes.push(["deletedAt"])
 
   return {
     title: name,
@@ -135,8 +143,14 @@ export class MogobaseClientDB {
             version: 0,
             primaryKey: "_id",
             type: "object",
-            properties: { _id: { type: "string", maxLength: 100 }, deletedAt: { type: ["string", "null"] } },
-            required: ["_id"],
+            properties: {
+              _id: { type: "string", maxLength: 100 },
+              deletedAt: { type: ["number", "null"], minimum: 0, maximum: 8640000000000000, multipleOf: 1 },
+              updatedAt: { type: "number", minimum: 0, maximum: 8640000000000000, multipleOf: 1 },
+              createdAt: { type: "number", minimum: 0, maximum: 8640000000000000, multipleOf: 1 },
+            },
+            required: ["_id", "updatedAt", "deletedAt", "createdAt"],
+            indexes: [["updatedAt"], ["deletedAt"]],
           }
       await db.addCollections({ [name]: { schema: jsonSchema } })
     }
@@ -160,6 +174,25 @@ export class MogobaseClientDB {
         const sub = a._rx.$.subscribe(() => fn())
         return { unsubscribe: () => sub.unsubscribe() }
       },
+    }
+  }
+
+  _syncHandle: SyncHandle | null = null
+
+  async startSync(options: SyncOptions = {}): Promise<SyncHandle> {
+    const db = await this.connect()
+    if (this._syncHandle) return this._syncHandle
+    const { startRxSync } = await import("./sync")
+    this._syncHandle = await startRxSync(db, options)
+    return this._syncHandle
+  }
+
+  async stopSync(): Promise<void> {
+    if (!this._syncHandle) return
+    try {
+      await this._syncHandle.cancel()
+    } finally {
+      this._syncHandle = null
     }
   }
 

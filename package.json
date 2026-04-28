@@ -16,6 +16,10 @@
       "types": "./types/server/index.d.ts",
       "default": "./lib/server/index.js"
     },
+    "./server/sync": {
+      "types": "./types/server/sync.d.ts",
+      "default": "./lib/server/sync.js"
+    },
     "./db": {
       "types": "./types/db/index.d.ts",
       "default": "./lib/db/index.js"
@@ -35,6 +39,10 @@
     "./provider": {
       "types": "./types/client/provider.d.ts",
       "default": "./lib/client/provider.js"
+    },
+    "./sync-types": {
+      "types": "./types/client/sync-types.d.ts",
+      "default": "./lib/client/sync-types.js"
     },
     "./package.json": "./package.json"
   },

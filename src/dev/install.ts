@@ -127,6 +127,21 @@ export { default as usePaginatedQuery } from "./usePaginatedQuery"
     installer.copy(path.join(apiSrc, f), path.join(apiTarget, f))
   }
 
+  // 2b) Sync route template — harmless when sync isn't used.
+  const syncSrc = path.join(root, "src/client/api/sync")
+  if (fs.existsSync(syncSrc)) {
+    const apiBase = path.dirname(apiTarget) // .../api
+    const syncTarget = path.join(apiBase, "sync")
+    fs.mkdirSync(syncTarget, { recursive: true })
+    log(`[sync route] Installing into ${path.relative(cwd, syncTarget)}`)
+    const syncFiles = fs
+      .readdirSync(syncSrc)
+      .filter((f) => fs.statSync(path.join(syncSrc, f)).isFile())
+    for (const f of syncFiles) {
+      installer.copy(path.join(syncSrc, f), path.join(syncTarget, f))
+    }
+  }
+
   // 3) Custom server at project root
   log(`[server] Installing server.ts at project root`)
   installer.copy(serverTpl, path.join(cwd, "server.ts"))
@@ -148,6 +163,7 @@ export { default as usePaginatedQuery } from "./usePaginatedQuery"
     `Import hooks from your local copy: import { useQuery, useMutation, usePaginatedQuery } from "@/hooks"`,
     `Online-only: wrap app in <MogobaseProvider online={true} handlers={() => import("@/mogobase")}> from "mogobase/provider" — no offline backend install needed`,
     `Offline mode: install rxdb (or @nozbe/watermelondb), then import the singleton (e.g. import RxClientDB from "mogobase/client-db") and pass it as <MogobaseProvider online={isOnline} clientDB={RxClientDB} handlers={() => import("@/mogobase")}>`,
+    `Sync mode (local-first + auto-sync online): pass <MogobaseProvider online={true} sync={true} clientDB={RxClientDB} handlers={...}>. Memoize syncOptions or define at module scope — it's part of the boot effect's dep array.`,
   ]
 
   log("")

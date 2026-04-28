@@ -1,8 +1,12 @@
 "use client"
-// <MogobaseProvider online clientDB handlers> — runtime flag + handler bootstrap for hooks.
+// <MogobaseProvider online clientDB handlers sync> — runtime flag + handler bootstrap for hooks.
 // Written with React.createElement to avoid JSX (tsconfig.jsxImportSource is hono/jsx).
 
 import * as React from "react"
+
+import type { SyncHandle, SyncOptions } from "./sync-types"
+
+export type { SyncHandle, SyncOptions } from "./sync-types"
 
 // Structural type for the offline client DB. Defined here so importing the type
 // does NOT pull rxdb / watermelon into the bundle. The concrete backend modules
@@ -17,10 +21,13 @@ export type MogobaseClientDB = {
   observeChanges: (name: string) => {
     subscribe: (fn: () => void) => { unsubscribe: () => void }
   }
+  startSync?: (options?: SyncOptions) => Promise<SyncHandle>
+  stopSync?: () => Promise<void>
 }
 
 export type MogobaseContextValue = {
   online: boolean
+  sync: boolean
   ready: boolean
   clientDB: MogobaseClientDB | null
 }
@@ -44,29 +51,38 @@ export type MogobaseProviderProps = {
   handlers?: () => Promise<unknown>
   // Optional custom DB name for the offline store.
   dbName?: string
-  // Required when online={false}. Import from "mogobase/client-db" (RxDB) or
-  // "mogobase/client-db/watermelon" (WatermelonDB) and pass the default export.
+  // Required when online={false} OR sync={true}. Import from "mogobase/client-db"
+  // (RxDB) or "mogobase/client-db/watermelon" (WatermelonDB) and pass the
+  // default export.
   clientDB?: MogobaseClientDB
+  // When true (and online), hooks read/write through clientDB and a background
+  // engine continuously replicates between clientDB and MongoDB. Requires
+  // `clientDB` to be provided. Memoize `syncOptions` (or pass a stable
+  // reference) — it's part of the boot effect's dep array.
+  sync?: boolean
+  syncOptions?: SyncOptions
   children?: React.ReactNode
 }
 
 export function MogobaseProvider(props: MogobaseProviderProps): React.ReactElement {
-  const { online, handlers, dbName, clientDB, children } = props
-  const [ready, setReady] = React.useState<boolean>(online ? true : false)
+  const { online, handlers, dbName, clientDB, sync, syncOptions, children } = props
+  const useClientDB = !online || (online && !!sync)
+  const [ready, setReady] = React.useState<boolean>(useClientDB ? false : true)
   const [resolvedDB, setResolvedDB] = React.useState<MogobaseClientDB | null>(null)
+  const syncHandleRef = React.useRef<SyncHandle | null>(null)
 
   React.useEffect(() => {
     let cancelled = false
     async function boot() {
-      if (online) {
+      if (online && !sync) {
         setReady(true)
         return
       }
       if (!clientDB) {
         throw new Error(
-          "[mogobase] <MogobaseProvider online={false}> requires a `clientDB` prop. " +
-            "Import from 'mogobase/client-db' (RxDB) or 'mogobase/client-db/watermelon' " +
-            "and pass it as the prop."
+          "[mogobase] <MogobaseProvider> requires a `clientDB` prop when offline " +
+            "or when `sync={true}`. Import from 'mogobase/client-db' (RxDB) or " +
+            "'mogobase/client-db/watermelon' (WatermelonDB) and pass it as the prop."
         )
       }
       await clientDB.connect(dbName)
@@ -79,19 +95,43 @@ export function MogobaseProvider(props: MogobaseProviderProps): React.ReactEleme
       if (cancelled) return
       setResolvedDB(clientDB)
       setReady(true)
+
+      if (online && sync) {
+        if (typeof clientDB.startSync !== "function") {
+          throw new Error(
+            "[mogobase] sync={true} requires a clientDB that implements startSync(). " +
+              "RxDB and WatermelonDB backends both support sync."
+          )
+        }
+        try {
+          const handle = await clientDB.startSync(syncOptions || {})
+          if (cancelled) {
+            await handle.cancel().catch(() => {})
+          } else {
+            syncHandleRef.current = handle
+          }
+        } catch (err) {
+          console.error("[mogobase] startSync failed:", err)
+        }
+      }
     }
-    setReady(online ? true : false)
+    setReady(useClientDB ? false : true)
     boot().catch((err) => {
-      console.error("[mogobase] offline boot failed:", err)
+      console.error("[mogobase] boot failed:", err)
     })
     return () => {
       cancelled = true
+      const h = syncHandleRef.current
+      syncHandleRef.current = null
+      if (h) {
+        h.cancel().catch(() => {})
+      }
     }
-  }, [online, handlers, dbName, clientDB])
+  }, [online, sync, handlers, dbName, clientDB, syncOptions, useClientDB])
 
   const value = React.useMemo<MogobaseContextValue>(
-    () => ({ online, ready, clientDB: resolvedDB }),
-    [online, ready, resolvedDB]
+    () => ({ online, sync: !!sync, ready, clientDB: resolvedDB }),
+    [online, sync, ready, resolvedDB]
   )
 
   return React.createElement(MogobaseContext.Provider, { value }, children)

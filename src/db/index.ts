@@ -98,6 +98,17 @@ class MogobaseDB {
     if (indexes) {
       await collection.createIndexes(indexes.indexSpecs, indexes.options)
     }
+    // Sync-mode auto-stamp indexes — required for the sync checkpoint cursor.
+    // MongoDB no-ops on duplicate index creates so this is safe to repeat.
+    try {
+      await collection.createIndexes([
+        { key: { updatedAt: 1 }, name: "mogobase_updatedAt_1" },
+        { key: { deletedAt: 1 }, name: "mogobase_deletedAt_1" },
+        { key: { createdAt: 1 }, name: "mogobase_createdAt_1" },
+      ])
+    } catch (err) {
+      console.warn(`[mogobase] failed to apply sync indexes for ${name}:`, err)
+    }
 
     return collection
   }

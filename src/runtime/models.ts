@@ -1,6 +1,8 @@
 // Shared model registry. Handler files call defineModel() from mogobase/runtime
 // at module scope; server + client each consume the registry when they boot.
 
+import { z } from "zod/v4"
+
 export type ModelDef = {
   name: string
   schema?: any
@@ -14,8 +16,44 @@ const g = globalThis as unknown as Record<string, { models: ModelDef[]; listener
 if (!g[KEY]) g[KEY] = { models: [], listeners: [] }
 const state = g[KEY]
 
+function isZodType(x: any): boolean {
+  return !!x && typeof x === "object" && typeof x._def === "object" && typeof x.parse === "function"
+}
+
+// Auto-inject sync timestamp fields. Sync correctness depends on these being
+// present and numeric — handler authors don't have to declare them.
+function withSyncFields(schema: any): any {
+  const syncFields = {
+    createdAt: z.number(),
+    updatedAt: z.number(),
+    deletedAt: z.number().nullable(),
+  }
+
+  if (schema == null) {
+    return syncFields
+  }
+
+  if (isZodType(schema)) {
+    if (typeof (schema as any).extend === "function") {
+      try {
+        return (schema as any).extend(syncFields)
+      } catch {
+        // Not a ZodObject; leave as-is.
+      }
+    }
+    return schema
+  }
+
+  if (typeof schema === "object") {
+    // Plain shape object — sync fields override any consumer-defined timestamp fields.
+    return { ...schema, ...syncFields }
+  }
+
+  return schema
+}
+
 export function defineModel(name: string, schema?: any, indexes?: any): void {
-  const def: ModelDef = { name, schema, indexes }
+  const def: ModelDef = { name, schema: withSyncFields(schema), indexes }
   state.models.push(def)
   for (const l of state.listeners) {
     try {

@@ -98,8 +98,17 @@ export class WatermelonMongoAdapter {
   }
 
   async insertOne(doc: any): Promise<{ acknowledged: true; insertedId: string }> {
+    const now = Date.now()
     const _id = doc._id || genId()
-    const record = { deletedAt: null, ...doc, _id }
+    const record: any = {
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+      ...doc,
+      _id,
+    }
+    if (!record.updatedAt) record.updatedAt = now
+    if (!record.createdAt) record.createdAt = now
     await this._wdb.write(async () => {
       await this.coll().create((r: any) => {
         r._raw.id = _id
@@ -112,13 +121,22 @@ export class WatermelonMongoAdapter {
   }
 
   async insertMany(docs: any[]): Promise<{ acknowledged: true; insertedIds: Record<number, string> }> {
+    const now = Date.now()
     const ids: Record<number, string> = {}
     const records: any[] = []
     await this._wdb.write(async () => {
       const prepared = docs.map((d, i) => {
         const _id = d._id || genId()
         ids[i] = _id
-        const record = { deletedAt: null, ...d, _id }
+        const record: any = {
+          createdAt: now,
+          updatedAt: now,
+          deletedAt: null,
+          ...d,
+          _id,
+        }
+        if (!record.updatedAt) record.updatedAt = now
+        if (!record.createdAt) record.createdAt = now
         records.push(record)
         return this.coll().prepareCreate((r: any) => {
           r._raw.id = _id
@@ -135,7 +153,8 @@ export class WatermelonMongoAdapter {
   async updateOne(filter: MongoFilter, update: MongoUpdate) {
     const target = await this.findOne(filter)
     if (!target) return { acknowledged: true, matchedCount: 0, modifiedCount: 0 }
-    const next = applyUpdate(target, update)
+    const now = Date.now()
+    const next = { ...applyUpdate(target, update), updatedAt: now }
     await this._wdb.write(async () => {
       const record = await this.coll().find(target._id)
       await record.update((r: any) => {
@@ -151,11 +170,12 @@ export class WatermelonMongoAdapter {
 
   async updateMany(filter: MongoFilter, update: MongoUpdate) {
     const targets = await this.find(filter).toArray()
+    const now = Date.now()
     const nexts: any[] = []
     await this._wdb.write(async () => {
       const ops = await Promise.all(
         targets.map(async (t) => {
-          const next = applyUpdate(t, update)
+          const next = { ...applyUpdate(t, update), updatedAt: now }
           nexts.push(next)
           const record = await this.coll().find(t._id)
           return record.prepareUpdate((r: any) => {
@@ -175,8 +195,8 @@ export class WatermelonMongoAdapter {
   async deleteOne(filter: MongoFilter) {
     const target = await this.findOne(filter)
     if (!target) return { acknowledged: true, deletedCount: 0 }
-    const now = new Date().toISOString()
-    const next = { ...target, deletedAt: now }
+    const now = Date.now()
+    const next = { ...target, deletedAt: now, updatedAt: now }
     await this._wdb.write(async () => {
       const record = await this.coll().find(target._id)
       await record.update((r: any) => {
@@ -190,12 +210,12 @@ export class WatermelonMongoAdapter {
 
   async deleteMany(filter: MongoFilter) {
     const targets = await this.find(filter).toArray()
-    const now = new Date().toISOString()
+    const now = Date.now()
     const nexts: any[] = []
     await this._wdb.write(async () => {
       const ops = await Promise.all(
         targets.map(async (t) => {
-          const next = { ...t, deletedAt: now }
+          const next = { ...t, deletedAt: now, updatedAt: now }
           nexts.push(next)
           const record = await this.coll().find(t._id)
           return record.prepareUpdate((r: any) => {

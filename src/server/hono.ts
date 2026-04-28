@@ -5,6 +5,7 @@ import handlers from "@/server/handlers"
 import DB from "@/db"
 import path from "path"
 import { config } from "dotenv"
+import { pullChanges, pushChanges } from "@/server/sync"
 
 const cwd = process.cwd()
 
@@ -66,6 +67,48 @@ app.post("/api/handlers", async (c: Context) => {
     })
     // await DB.disconnect();
     return c.json(rs)
+  } catch (error) {
+    return c.text(`${error}`, 400)
+  }
+})
+
+app.use(
+  "/api/sync",
+  cors({
+    origin: process.env.NEXT_PUBLIC_HOST || process.env.HOST || "http://localhost:3000",
+    allowHeaders: ["Content-Type", "Authorization"],
+    allowMethods: ["POST", "OPTIONS"],
+    exposeHeaders: ["Content-Length"],
+    maxAge: 600,
+    credentials: true,
+  })
+)
+
+app.post("/api/sync", async (c: Context) => {
+  const action = c.req.query("action")
+  let body: any
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.text("Invalid JSON", 400)
+  }
+  try {
+    if (action === "pull") {
+      const rs = await pullChanges({
+        model: body.model,
+        checkpoint: body.checkpoint ?? null,
+        batchSize: body.batchSize,
+      })
+      return c.json(rs)
+    }
+    if (action === "push") {
+      const rs = await pushChanges({
+        model: body.model,
+        rows: body.rows || [],
+      })
+      return c.json(rs)
+    }
+    return c.text("Unknown action", 400)
   } catch (error) {
     return c.text(`${error}`, 400)
   }

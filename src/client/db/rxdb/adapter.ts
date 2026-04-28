@@ -25,6 +25,13 @@ function toSelector(filter: MongoFilter): any {
   return filter
 }
 
+function injectUpdatedAt(update: MongoUpdate, now: number): MongoUpdate {
+  if (!update || typeof update !== "object") return { updatedAt: now }
+  const hasOperators = Object.keys(update).some((k) => k.startsWith("$"))
+  if (!hasOperators) return { ...update, updatedAt: now }
+  return { ...update, $set: { ...(update.$set || {}), updatedAt: now } }
+}
+
 function applyUpdate(doc: any, update: MongoUpdate): any {
   // Support $set, $unset, $inc, $push, $pull. Bare updates (no $-operator) are
   // treated as a full replace merged with _id.
@@ -122,51 +129,81 @@ export class RxMongoAdapter {
   }
 
   async insertOne(doc: any): Promise<{ acknowledged: true; insertedId: string }> {
+    const now = Date.now()
     const _id = doc._id || genId()
-    const toInsert = { deletedAt: null, ...doc, _id }
+    const toInsert: any = {
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+      ...doc,
+      _id,
+    }
+    if (!toInsert.updatedAt) toInsert.updatedAt = now
+    if (!toInsert.createdAt) toInsert.createdAt = now
     await this._rx.insert(toInsert)
     return { acknowledged: true, insertedId: _id }
   }
 
   async insertMany(docs: any[]): Promise<{ acknowledged: true; insertedIds: Record<number, string> }> {
+    const now = Date.now()
     const ids: Record<number, string> = {}
     const toInsert = docs.map((d, i) => {
       const _id = d._id || genId()
       ids[i] = _id
-      return { deletedAt: null, ...d, _id }
+      const next: any = {
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+        ...d,
+        _id,
+      }
+      if (!next.updatedAt) next.updatedAt = now
+      if (!next.createdAt) next.createdAt = now
+      return next
     })
     await this._rx.bulkInsert(toInsert)
     return { acknowledged: true, insertedIds: ids }
   }
 
   async updateOne(filter: MongoFilter, update: MongoUpdate) {
+    const now = Date.now()
+    const stamped = injectUpdatedAt(update, now)
     const doc = await this._rx.findOne({ selector: toSelector(filter) }).exec()
     if (!doc) return { acknowledged: true, matchedCount: 0, modifiedCount: 0 }
-    await (doc as RxDocument).incrementalModify((data: any) => applyUpdate(data, update))
+    await (doc as RxDocument).incrementalModify((data: any) => applyUpdate(data, stamped))
     return { acknowledged: true, matchedCount: 1, modifiedCount: 1 }
   }
 
   async updateMany(filter: MongoFilter, update: MongoUpdate) {
+    const now = Date.now()
+    const stamped = injectUpdatedAt(update, now)
     const docs = await this._rx.find({ selector: toSelector(filter) }).exec()
     await Promise.all(
-      docs.map((d: RxDocument) => d.incrementalModify((data: any) => applyUpdate(data, update)))
+      docs.map((d: RxDocument) => d.incrementalModify((data: any) => applyUpdate(data, stamped)))
     )
     return { acknowledged: true, matchedCount: docs.length, modifiedCount: docs.length }
   }
 
   async deleteOne(filter: MongoFilter) {
     // Soft-delete to match server convention (buildMongoFilters appends deletedAt: null).
+    const now = Date.now()
     const doc = await this._rx.findOne({ selector: toSelector(filter) }).exec()
     if (!doc) return { acknowledged: true, deletedCount: 0 }
-    await (doc as RxDocument).incrementalModify((data: any) => ({ ...data, deletedAt: new Date().toISOString() }))
+    await (doc as RxDocument).incrementalModify((data: any) => ({
+      ...data,
+      deletedAt: now,
+      updatedAt: now,
+    }))
     return { acknowledged: true, deletedCount: 1 }
   }
 
   async deleteMany(filter: MongoFilter) {
     const docs = await this._rx.find({ selector: toSelector(filter) }).exec()
-    const now = new Date().toISOString()
+    const now = Date.now()
     await Promise.all(
-      docs.map((d: RxDocument) => d.incrementalModify((data: any) => ({ ...data, deletedAt: now })))
+      docs.map((d: RxDocument) =>
+        d.incrementalModify((data: any) => ({ ...data, deletedAt: now, updatedAt: now }))
+      )
     )
     return { acknowledged: true, deletedCount: docs.length }
   }

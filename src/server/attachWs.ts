@@ -5,6 +5,7 @@ import { ChangeStream, ChangeStreamOptions, Document } from "mongodb"
 
 import handlers from "./handlers"
 import DB from "@/db"
+import { pullChanges, pushChanges, streamChanges } from "./sync"
 
 type PaginatedSub = {
   name: string
@@ -26,6 +27,7 @@ type SocketState = {
   ws: WebSocket
   changeStreams?: ChangeStream[]
   paginated?: PaginatedSub
+  syncUnsub?: () => void
 }
 
 export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws") {
@@ -271,6 +273,70 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       )
     }
 
+    if (type === "sync-subscribe") {
+      const models: string[] = Array.isArray(data.models) ? data.models : []
+      const prev = state.get(id)
+      if (prev?.syncUnsub) {
+        try { prev.syncUnsub() } catch {}
+      }
+      const unsub = streamChanges(models, (model) => {
+        sendJson(ws, { type: "sync-stream", model })
+      })
+      const current = state.get(id)
+      if (current) state.set(id, { ...current, syncUnsub: unsub })
+      else unsub()
+      return
+    }
+
+    if (type === "sync-pull") {
+      try {
+        const rs = await pullChanges({
+          model: data.model,
+          checkpoint: data.checkpoint ?? null,
+          batchSize: data.batchSize,
+        })
+        sendJson(ws, {
+          type: "SyncPullResult",
+          model: data.model,
+          documents: rs.documents,
+          checkpoint: rs.checkpoint,
+        })
+      } catch (error: any) {
+        sendJson(ws, {
+          type: "SyncPullResult",
+          model: data.model,
+          success: false,
+          error: `${error?.message || error}`,
+          documents: [],
+          checkpoint: data.checkpoint ?? null,
+        })
+      }
+      return
+    }
+
+    if (type === "sync-push") {
+      try {
+        const rs = await pushChanges({
+          model: data.model,
+          rows: Array.isArray(data.rows) ? data.rows : [],
+        })
+        sendJson(ws, {
+          type: "SyncPushResult",
+          model: data.model,
+          conflicts: rs.conflicts,
+        })
+      } catch (error: any) {
+        sendJson(ws, {
+          type: "SyncPushResult",
+          model: data.model,
+          success: false,
+          error: `${error?.message || error}`,
+          conflicts: [],
+        })
+      }
+      return
+    }
+
     if (!name) return sendJson(ws, { success: false, error: "Name is required" })
 
     if (type === "query") {
@@ -332,6 +398,10 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
     ws.on("close", async () => {
       await closeStreams(id)
       await closePaginatedSub(id)
+      const s = state.get(id)
+      if (s?.syncUnsub) {
+        try { s.syncUnsub() } catch {}
+      }
       state.delete(id)
     })
   })

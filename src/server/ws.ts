@@ -2,6 +2,7 @@
 import { createNodeWebSocket, NodeWebSocket } from "@hono/node-ws"
 import handlers from "./handlers"
 import DB from "@/db"
+import { pullChanges, pushChanges, streamChanges } from "./sync"
 import { Hono } from "hono"
 import { ServerType } from "@hono/node-server"
 import { ChangeStream, ChangeStreamOptions, Document } from "mongodb"
@@ -268,6 +269,78 @@ class WebSocket {
       )
     }
 
+    if (type === "sync-subscribe") {
+      const models: string[] = Array.isArray(data.models) ? data.models : []
+      const prev = this._state.get(id)
+      if (prev?.syncUnsub) {
+        try { prev.syncUnsub() } catch {}
+      }
+      const unsub = streamChanges(models, (model) => {
+        if (socket?.readyState !== 1) return
+        socket.send(JSON.stringify({ type: "sync-stream", model }))
+      })
+      const current = this._state.get(id) || {}
+      this._state.set(id, { ...current, syncUnsub: unsub })
+      return
+    }
+
+    if (type === "sync-pull") {
+      try {
+        const rs = await pullChanges({
+          model: data.model,
+          checkpoint: data.checkpoint ?? null,
+          batchSize: data.batchSize,
+        })
+        socket.send(
+          JSON.stringify({
+            type: "SyncPullResult",
+            model: data.model,
+            documents: rs.documents,
+            checkpoint: rs.checkpoint,
+          })
+        )
+      } catch (error: any) {
+        socket.send(
+          JSON.stringify({
+            type: "SyncPullResult",
+            model: data.model,
+            success: false,
+            error: `${error?.message || error}`,
+            documents: [],
+            checkpoint: data.checkpoint ?? null,
+          })
+        )
+      }
+      return
+    }
+
+    if (type === "sync-push") {
+      try {
+        const rs = await pushChanges({
+          model: data.model,
+          rows: Array.isArray(data.rows) ? data.rows : [],
+        })
+        socket.send(
+          JSON.stringify({
+            type: "SyncPushResult",
+            model: data.model,
+            conflicts: rs.conflicts,
+          })
+        )
+      } catch (error: any) {
+        socket.send(
+          JSON.stringify({
+            type: "SyncPushResult",
+            model: data.model,
+            success: false,
+            error: `${error?.message || error}`,
+            conflicts: [],
+          })
+        )
+      }
+      return
+    }
+
     if (!name) {
       return socket.send(JSON.stringify({ success: false, error: "Name is required" }))
     }
@@ -341,6 +414,10 @@ class WebSocket {
         onClose: async () => {
           await this._closeStreams(id)
           await this._closePaginatedSub(id)
+          const s = this._state.get(id)
+          if (s?.syncUnsub) {
+            try { s.syncUnsub() } catch {}
+          }
           this._state.delete(id)
         },
       }
