@@ -2,11 +2,19 @@
   "name": "mogobase",
   "type": "module",
   "version": "2.8.0",
-  "description": "",
+  "description": "Lightweight Next.js + MongoDB backend with typed handlers, WebSocket live queries, and opt-in offline / local-first sync.",
   "main": "lib/index.js",
   "types": "types/index.d.ts",
   "author": "SameSame Tech Team",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samesametech/mogobase.git"
+  },
+  "homepage": "https://github.com/samesametech/mogobase#readme",
+  "bugs": {
+    "url": "https://github.com/samesametech/mogobase/issues"
+  },
   "exports": {
     ".": {
       "types": "./types/index.d.ts",

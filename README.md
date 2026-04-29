@@ -2,6 +2,8 @@
 
 A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive queries over WebSockets, Convex-style typed handlers, **opt-in offline support** via RxDB or WatermelonDB, and **opt-in local-first sync** that keeps the client store and MongoDB continuously replicated.
 
+Source: [github.com/samesametech/mogobase](https://github.com/samesametech/mogobase) · npm: [`mogobase`](https://www.npmjs.com/package/mogobase)
+
 - **Typed handlers** — define `query()` / `mutation()` with zod-validated args.
 - **Reactive queries** — `useQuery` and `usePaginatedQuery` both re-run their handlers on MongoDB change stream events. For `usePaginatedQuery` the server reuses the currently-loaded window as the effective limit so scroll position is preserved across refetches, and enrichments from joined collections (watched with additional `ctx.watch` calls) stay fresh.
 - **Offline mode is opt-in** — same handlers run in the browser against RxDB/IndexedDB or WatermelonDB/LokiJS. The consumer imports the backend they want and passes it as `<MogobaseProvider clientDB={…}>`. Online-only apps install neither offline package — `rxdb` and `@nozbe/watermelondb` are both optional peer dependencies. Both backends sync writes across same-origin tabs via BroadcastChannel.
