@@ -39,6 +39,7 @@ This writes:
 
 - `src/hooks/useQuery.ts`, `useMutation.ts`, `usePaginatedQuery.ts`, `index.ts` (or `hooks/` if no `src/` folder).
 - `src/app/api/handlers/route.ts` (or `app/api/handlers/route.ts`).
+- `src/app/api/sync/route.ts` (or `app/api/sync/route.ts`) — HTTP fallback for sync mode. Harmless if you don't use sync; required if you do. Replace its placeholder `getSession` and `syncPolicy` with your real auth integration before enabling sync.
 - `server.ts` at the project root.
 - Creates `./mogobase/` for your handler files.
 
@@ -111,6 +112,62 @@ export default function Providers({ children }: { children: React.ReactNode }) {
 Then mount `<Providers>` inside `app/layout.tsx`. When `online={false}`, the provider connects `clientDB`, runs `handlers()` so handler registrations land in the runtime singleton, and replays `defineModel` calls against the local store.
 
 For online-only apps, skip the offline backend install, the `clientDB` prop, and `handlers` — the WebSocket path serves all queries and mutations.
+
+## Step 5b (sync only) — Wire a SyncPolicy
+
+When `sync={true}`, every pull/push/watch goes through a `SyncPolicy` callback
+that decides allow/filter/transform per-op. **Default-deny**: a model
+without `sync: true` on `defineModel` throws; a request without an
+`allow: true` decision is rejected.
+
+Define the policy once and wire it into both transports:
+
+```ts
+// mogobase/syncPolicy.ts
+import type { SyncPolicy } from "mogobase/server"
+import { getSession } from "./auth"
+
+export const syncPolicy: SyncPolicy = async ({ model, headers }) => {
+  const session = await getSession({ headers })
+  if (!session) return { allow: false }
+  const userId = session.user.id
+
+  if (model === "posts" || model === "categories") {
+    return {
+      allow: true,
+      filter: { userId },
+      transform: (doc, existing) => {
+        if (existing && existing.userId !== userId) {
+          throw new Error("Forbidden: cross-tenant write")
+        }
+        return { ...doc, userId }
+      },
+    }
+  }
+
+  return { allow: false }
+}
+```
+
+WebSocket transport (in `server.ts`):
+
+```ts
+import { attachMogobaseWebSocket } from "mogobase/server"
+import { syncPolicy } from "./mogobase/syncPolicy"
+
+attachMogobaseWebSocket(server, "/ws", { syncPolicy })
+```
+
+HTTP fallback (in `src/app/api/sync/route.ts`): replace the scaffolded
+placeholder policy with an import of the same module:
+
+```ts
+import { syncPolicy } from "../../../../mogobase/syncPolicy"
+```
+
+See `mogobase://guide/sync` for the full security model (default-deny
+allowlist, `clientFields` projection, server-owned timestamps, push batch
+cap).
 
 ## Step 6 — Add handlers
 

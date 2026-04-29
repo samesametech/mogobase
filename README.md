@@ -6,6 +6,7 @@ A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive 
 - **Reactive queries** — `useQuery` and `usePaginatedQuery` both re-run their handlers on MongoDB change stream events. For `usePaginatedQuery` the server reuses the currently-loaded window as the effective limit so scroll position is preserved across refetches, and enrichments from joined collections (watched with additional `ctx.watch` calls) stay fresh.
 - **Offline mode is opt-in** — same handlers run in the browser against RxDB/IndexedDB or WatermelonDB/LokiJS. The consumer imports the backend they want and passes it as `<MogobaseProvider clientDB={…}>`. Online-only apps install neither offline package — `rxdb` and `@nozbe/watermelondb` are both optional peer dependencies. Both backends sync writes across same-origin tabs via BroadcastChannel.
 - **Local-first sync is opt-in** — turn on `sync={true}` and the same hooks read/write through `clientDB` while a background engine continuously replicates with MongoDB over the existing `/ws` connection. Writes pushed up; server changes streamed down; offline writes queue locally and replay when the WS reconnects.
+- **Sync security is built in** — default-deny model allowlist (`sync: true` per model), `clientFields` projection (server-only fields never reach the client; clients can't write outside the allowlist), per-op `SyncPolicy` callback for allow/filter/transform with the request headers, server-owned timestamps, and a 500-row push batch cap.
 - **One server** — a custom Next.js `server.ts` serves both your app and the mogobase WS endpoint.
 - **MongoDB-native** — thin wrapper around the official driver; no ORM, no schema lock-in.
 - **MCP server** — ships a Model Context Protocol server (`mogobase mcp`) that teaches AI assistants how to scaffold and extend a mogobase project.
@@ -109,7 +110,11 @@ Handler `ctx` provides:
 
 Use `internalQuery()` / `internalMutation()` for handlers that should only be callable from server code (stored under the `internal.` prefix).
 
-`defineModel(name, schema?, indexes?)` registers a model for both MongoDB (creates the collection, applies indexes) and RxDB (uses the Zod schema to derive a JSON schema). A schema is required for offline mode.
+`defineModel(name, schema?, options?)` registers a model for both MongoDB (creates the collection, applies indexes) and RxDB (uses the Zod schema to derive a JSON schema). A schema is required for offline mode. Useful options:
+
+- `indexSpecs` — passed to `createIndexes`. The engine always adds `updatedAt`, `deletedAt`, `createdAt` indexes (sync depends on them) on top of yours.
+- `clientFields: string[]` — visibility allowlist. Used by `filterClientFields(model, doc)` (online flow) and the sync engine (pull projection + push allowlist). Engine fields (`_id`, `createdAt`, `updatedAt`, `deletedAt`) are always included. Omit for no restriction.
+- `sync: true` — opt the model into mogobase sync. Default-deny: pull/push/watch on a model without `sync: true` throws.
 
 ### 2. Wrap your app with `MogobaseProvider`
 
@@ -196,13 +201,59 @@ What you get:
 - Reads are instant (served from IndexedDB / LokiJS).
 - Writes don't wait for the network — they replay automatically when the WS reconnects.
 - Server changes from other clients land within ~3s via a `sync-stream` event that re-pulls.
-- `createdAt` / `updatedAt` / `deletedAt` are auto-injected into every model schema and auto-stamped on every write — handler authors don't have to declare or update them. Timestamps are numeric ms (`Date.now()`).
+- `createdAt` / `updatedAt` / `deletedAt` are auto-injected into every model schema and auto-stamped on every write — handler authors don't have to declare or update them. Timestamps are numeric ms (`Date.now()`). Server timestamps **always override** client values; the client clock is only consulted for conflict ordering.
 - Soft-deletes propagate (`deleteOne` is rewritten to `$set: {deletedAt, updatedAt}` so the sync checkpoint can carry tombstones). Reach through to the underlying driver if you really need a hard delete.
+
+#### Securing sync (`SyncPolicy`)
+
+Every pull / push / watch goes through a `SyncPolicy` callback you wire into both transports. Defaults are secure (default-deny). Define the policy once and import it from both places:
+
+```ts
+// mogobase/syncPolicy.ts
+import type { SyncPolicy } from "mogobase/server"
+import { getSession } from "./auth"
+
+export const syncPolicy: SyncPolicy = async ({ model, headers }) => {
+  const session = await getSession({ headers })
+  if (!session) return { allow: false }
+  const userId = session.user.id
+
+  if (model === "posts" || model === "categories") {
+    return {
+      allow: true,
+      filter: { userId },
+      transform: (doc, existing) => {
+        if (existing && existing.userId !== userId) {
+          throw new Error("Forbidden: cross-tenant write")
+        }
+        return { ...doc, userId }
+      },
+    }
+  }
+  return { allow: false }
+}
+```
+
+```ts
+// server.ts
+import { attachMogobaseWebSocket } from "mogobase/server"
+import { syncPolicy } from "./mogobase/syncPolicy"
+attachMogobaseWebSocket(server, "/ws", { syncPolicy })
+```
+
+```ts
+// app/api/sync/route.ts (the scaffolded HTTP fallback)
+import { syncPolicy } from "../../../../mogobase/syncPolicy"
+```
+
+`filter` is merged into the pull WHERE clause and translated to a change-stream `$match` pipeline — MongoDB only sends notifications for in-scope docs. `transform(doc, existing)` runs once per pushed row; throw to reject (the server's existing doc is returned as a conflict). Combine with `clientFields` on `defineModel` so server-only fields never ship and the push payload is allowlisted.
 
 Caveats:
 
 - `_id` must be a string. Sync mode collections are incompatible with existing `ObjectId` `_id`s.
 - Memoize `syncOptions` (or define at module scope). It's in the provider's effect dep array — an inline `{}` will tear down and restart sync on every render.
+- A model needs `sync: true` on `defineModel` to be syncable. The server only auto-loads `./mogobase/*.ts`; if you split sync handlers into a separate folder, extend the `loadHandlers()` loop in `server.ts` to load it too — otherwise `sync: true` only registers on the client.
+- Don't hard-delete on a synced model with a per-tenant `filter`: change-stream delete events don't carry `fullDocument`, so the `$match` filter drops them and clients miss tombstones.
 - WatermelonDB does a full pull per cycle; for >10K records per model the initial sync is slow. RxDB doesn't have this limitation.
 - For paginated queries that must work in both modes (server-side Mongo and client-side adapter), use the runtime helpers `isServer()` + `MongoPaging` to dispatch between `mongo-cursor-pagination` (server) and the browser-safe polyfill (client). See `mogobase://guide/handlers` → "Isomorphic handlers".
 - See `mogobase://guide/sync` (MCP) for the wire protocol, conflict resolution defaults, and the full list of edge cases.

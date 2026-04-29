@@ -2,7 +2,14 @@
 import { createNodeWebSocket, NodeWebSocket } from "@hono/node-ws"
 import handlers from "./handlers"
 import DB from "@/db"
-import { pullChanges, pushChanges, streamChanges } from "./sync"
+import {
+  pullChanges,
+  pushChanges,
+  streamChanges,
+  filterToWatchPipeline,
+  type SyncPolicy,
+  type SyncPolicyDecision,
+} from "./sync"
 import { Hono } from "hono"
 import { ServerType } from "@hono/node-server"
 import { ChangeStream, ChangeStreamOptions, Document } from "mongodb"
@@ -28,12 +35,31 @@ class WebSocket {
 
   _nodeWebSocket?: NodeWebSocket
   _state: Map<string, any> = new Map()
+  _syncPolicy?: SyncPolicy
 
   constructor() {
     if (!WebSocket._instance) {
       WebSocket._instance = this
     }
     return WebSocket._instance
+  }
+
+  setSyncPolicy(policy: SyncPolicy | undefined) {
+    this._syncPolicy = policy
+  }
+
+  async _evaluatePolicy(
+    op: "pull" | "push" | "watch",
+    model: string,
+    headers: any
+  ): Promise<SyncPolicyDecision> {
+    if (!this._syncPolicy) return { allow: true }
+    try {
+      return await this._syncPolicy({ op, model, headers })
+    } catch (err) {
+      console.warn(`[mogobase/sync] policy threw for ${op} ${model}:`, err)
+      return { allow: false }
+    }
   }
 
   async _closeStreams(id: string) {
@@ -275,7 +301,14 @@ class WebSocket {
       if (prev?.syncUnsub) {
         try { prev.syncUnsub() } catch {}
       }
-      const unsub = streamChanges(models, (model) => {
+      const specs: { model: string; pipeline?: any[] }[] = []
+      for (const model of models) {
+        const decision = await this._evaluatePolicy("watch", model, headers)
+        if (!decision.allow) continue
+        const pipeline = decision.filter ? filterToWatchPipeline(decision.filter) : undefined
+        specs.push({ model, pipeline })
+      }
+      const unsub = streamChanges(specs, (model) => {
         if (socket?.readyState !== 1) return
         socket.send(JSON.stringify({ type: "sync-stream", model }))
       })
@@ -286,10 +319,15 @@ class WebSocket {
 
     if (type === "sync-pull") {
       try {
+        const decision = await this._evaluatePolicy("pull", data.model, headers)
+        if (!decision.allow) {
+          throw new Error("Forbidden")
+        }
         const rs = await pullChanges({
           model: data.model,
           checkpoint: data.checkpoint ?? null,
           batchSize: data.batchSize,
+          extraFilter: decision.filter,
         })
         socket.send(
           JSON.stringify({
@@ -316,9 +354,14 @@ class WebSocket {
 
     if (type === "sync-push") {
       try {
+        const decision = await this._evaluatePolicy("push", data.model, headers)
+        if (!decision.allow) {
+          throw new Error("Forbidden")
+        }
         const rs = await pushChanges({
           model: data.model,
           rows: Array.isArray(data.rows) ? data.rows : [],
+          transform: decision.transform,
         })
         socket.send(
           JSON.stringify({

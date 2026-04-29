@@ -3,10 +3,37 @@
 
 import { z } from "zod/v4"
 
+// Engine-managed fields. Always considered client-visible regardless of
+// `clientFields` allowlist — `_id` is identity, the timestamps are needed for
+// caching, ordering, and tombstone detection on the client.
+export const CLIENT_ENGINE_FIELDS = ["_id", "createdAt", "updatedAt", "deletedAt"] as const
+
+export type ModelOptions = {
+  indexes?: any
+  indexSpecs?: any
+  // Visibility allowlist. Used by:
+  //   - filterClientFields(model, docs) to strip server-only fields from
+  //     handler return values in the online flow.
+  //   - sync engine pull projection (server-only fields never reach clients).
+  //   - sync engine push allowlist (clients can only write fields they can read).
+  // Unset → no restriction (every field visible/writable). Engine fields are
+  // always included on top of any provided allowlist.
+  clientFields?: string[]
+  // Opt-in to mogobase sync. Default-deny: sync ops on a model without
+  // `sync: true` throw. Independent from `clientFields` so models can be
+  // online-only with field filtering, or sync-enabled without restrictions.
+  sync?: boolean
+  [k: string]: any
+}
+
 export type ModelDef = {
   name: string
   schema?: any
   indexes?: any
+  indexSpecs?: any
+  clientFields?: string[]
+  sync?: boolean
+  [k: string]: any
 }
 
 type Listener = (m: ModelDef) => void | Promise<void>
@@ -52,8 +79,15 @@ function withSyncFields(schema: any): any {
   return schema
 }
 
-export function defineModel(name: string, schema?: any, indexes?: any): void {
-  const def: ModelDef = { name, schema: withSyncFields(schema), indexes }
+export function defineModel(name: string, schema?: any, options?: ModelOptions | any): void {
+  const opts: ModelOptions = (options && typeof options === "object" && !Array.isArray(options)) ? options : { indexes: options }
+  const def: ModelDef = {
+    ...opts,
+    name,
+    schema: withSyncFields(schema),
+    clientFields: opts.clientFields,
+    sync: opts.sync === true,
+  }
   state.models.push(def)
   for (const l of state.listeners) {
     try {
@@ -66,6 +100,64 @@ export function defineModel(name: string, schema?: any, indexes?: any): void {
 
 export function getModels(): ModelDef[] {
   return state.models.slice()
+}
+
+// Multiple defineModel() calls for the same name are tolerated (e.g. online +
+// offline handler files registering the same collection). The most recent
+// entry with the requested config wins.
+function findLatest<T>(name: string, pick: (m: ModelDef) => T | undefined): T | undefined {
+  for (let i = state.models.length - 1; i >= 0; i--) {
+    const m = state.models[i]
+    if (m.name !== name) continue
+    const v = pick(m)
+    if (v !== undefined) return v
+  }
+  return undefined
+}
+
+export function getClientFields(name: string): string[] | undefined {
+  return findLatest(name, (m) => m.clientFields)
+}
+
+export function isSyncEnabled(name: string): boolean {
+  return findLatest(name, (m) => (m.sync === true ? true : undefined)) === true
+}
+
+function projectToClientFields(doc: any, allowed: Set<string>): any {
+  if (!doc || typeof doc !== "object") return doc
+  const out: any = {}
+  for (const k of Object.keys(doc)) {
+    if (allowed.has(k)) out[k] = doc[k]
+  }
+  return out
+}
+
+// Strip server-only fields from handler return values. Looks up the model's
+// `clientFields` allowlist, projects each doc to allowlist + engine fields.
+// Pass-through if the model has no allowlist configured.
+//
+// Handles three input shapes:
+//   - single document object → projected document
+//   - array of documents → array of projected documents
+//   - paginated result `{ results: [...], hasNext, ... }` → same shape with
+//     `results` projected (other fields preserved)
+export function filterClientFields<T = any>(model: string, input: T): T {
+  if (input == null) return input
+  const fields = getClientFields(model)
+  if (!fields) return input
+  const allowed = new Set<string>([...CLIENT_ENGINE_FIELDS, ...fields])
+
+  if (Array.isArray(input)) {
+    return input.map((d) => projectToClientFields(d, allowed)) as any
+  }
+  if (typeof input === "object") {
+    const obj = input as any
+    if (Array.isArray(obj.results)) {
+      return { ...obj, results: obj.results.map((d: any) => projectToClientFields(d, allowed)) } as any
+    }
+    return projectToClientFields(obj, allowed) as any
+  }
+  return input
 }
 
 export function onModel(listener: Listener): () => void {

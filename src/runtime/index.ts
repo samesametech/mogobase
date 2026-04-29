@@ -11,7 +11,17 @@ import {
   runMutation,
   v,
 } from "@/server/handlers"
-import { defineModel, getModels, onModel, type ModelDef } from "./models"
+import {
+  defineModel,
+  getModels,
+  getClientFields,
+  isSyncEnabled,
+  filterClientFields,
+  CLIENT_ENGINE_FIELDS,
+  onModel,
+  type ModelDef,
+  type ModelOptions,
+} from "./models"
 import { isServer, isClient } from "./env"
 import { MongoPaging, type PagingParams, type PagingResult } from "./paging"
 
@@ -35,9 +45,13 @@ export {
   PaginationQueryArgs,
   defineModel,
   getModels,
+  getClientFields,
+  isSyncEnabled,
+  filterClientFields,
+  CLIENT_ENGINE_FIELDS,
   onModel,
   isServer,
   isClient,
   MongoPaging,
 }
-export type { ModelDef, PagingParams, PagingResult }
+export type { ModelDef, ModelOptions, PagingParams, PagingResult }

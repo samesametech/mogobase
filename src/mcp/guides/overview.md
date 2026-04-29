@@ -5,9 +5,11 @@ Mogobase is a Next.js-focused backend layer that combines MongoDB persistence, a
 ## What it gives you
 
 - **Handlers**: `query()` / `mutation()` / `internalQuery()` / `internalMutation()` registered at module scope in `./mogobase/*.ts`. Zod v4 args, typed context with `db`, `runQuery`, `runMutation`, `headers`, and `watch` (queries only).
-- **MongoDB wrapper**: `MogobaseDB` singleton with `defineModel(name, schema?, indexes?)`, `Id` (`ObjectId`), `buildFilters`, and `DataLoaderGenerate` for batched reads.
+- **MongoDB wrapper**: `MogobaseDB` singleton with `defineModel(name, schema?, options?)`, `Id` (`ObjectId`), `buildFilters`, and `DataLoaderGenerate` for batched reads. `defineModel` options include `clientFields` (visibility allowlist) and `sync: true` (default-deny sync opt-in).
 - **Live queries over WebSocket**: `attachMogobaseWebSocket(httpServer)` in the custom `server.ts`. `useQuery` re-runs its handler on every matching change-stream event; `usePaginatedQuery` refetches the full loaded window on any `ctx.watch`-registered change — so both queries and paginated lists stay live, including enrichments from joined collections.
 - **Offline mode (opt-in)**: import an offline-store singleton (`mogobase/client-db` for RxDB, `mogobase/client-db/watermelon` for WatermelonDB) and pass it as `<MogobaseProvider clientDB={…}>`. Hooks run handlers directly against the local store and re-run on change events. Both backends are **optional peer dependencies** — an online-only app installs neither. Both propagate writes across same-origin tabs — RxDB via its built-in BroadcastChannel, WatermelonDB via a `BroadcastChannel("mogobase-watermelon-<dbName>")` shim provided by mogobase.
+- **Local-first sync (opt-in)**: `online + sync` mode replicates clientDB ↔ MongoDB over `/ws` (or `/api/sync` fallback). Security is layered: default-deny model allowlist (`sync: true` per model), `clientFields` projection on pull and strip on push, per-op `SyncPolicy` callback for `allow`/`filter`/`transform`, server-owned timestamps, and a 500-row push batch cap. See `mogobase://guide/sync`.
+- **`filterClientFields(model, input)`**: utility from `mogobase/runtime` for online handlers to strip server-only fields out of return values using the same `clientFields` allowlist used by sync.
 - **CLI**: `mogobase install` scaffolds the consumer's Next.js project; `mogobase mcp` runs this MCP server; `mogobase dev` runs a standalone Hono server (legacy, not needed for the Next.js path).
 
 ## The Next.js setup at a glance
@@ -26,4 +28,4 @@ Mogobase is a Next.js-focused backend layer that combines MongoDB persistence, a
 - **Names starting with `internal`** are routed to internal maps and stored with an `internal.` prefix. Only callable via `ctx.runQuery("internal.foo")` / `ctx.runMutation("internal.foo")` — not exposed to clients.
 - **Offline-mode model registration order matters for WatermelonDB**: all `defineModel` calls must occur before the DB is first accessed.
 
-See the other guides for detailed patterns: `setup`, `handlers`, `models`, `hooks`, `provider`, `offline-backends`, `troubleshooting`.
+See the other guides for detailed patterns: `setup`, `handlers`, `models`, `hooks`, `provider`, `offline-backends`, `sync`, `troubleshooting`.

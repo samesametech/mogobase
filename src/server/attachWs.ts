@@ -5,7 +5,14 @@ import { ChangeStream, ChangeStreamOptions, Document } from "mongodb"
 
 import handlers from "./handlers"
 import DB from "@/db"
-import { pullChanges, pushChanges, streamChanges } from "./sync"
+import {
+  pullChanges,
+  pushChanges,
+  streamChanges,
+  filterToWatchPipeline,
+  type SyncPolicy,
+  type SyncPolicyDecision,
+} from "./sync"
 
 type PaginatedSub = {
   name: string
@@ -30,9 +37,32 @@ type SocketState = {
   syncUnsub?: () => void
 }
 
-export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws") {
+export type AttachMogobaseOptions = {
+  syncPolicy?: SyncPolicy
+}
+
+export function attachMogobaseWebSocket(
+  server: HttpServer,
+  path: string = "/ws",
+  options: AttachMogobaseOptions = {}
+) {
   const wss = new WebSocketServer({ noServer: true })
   const state = new Map<string, SocketState>()
+  const syncPolicy = options.syncPolicy
+
+  async function evaluatePolicy(
+    op: "pull" | "push" | "watch",
+    model: string,
+    headers: IncomingMessage["headers"]
+  ): Promise<SyncPolicyDecision> {
+    if (!syncPolicy) return { allow: true }
+    try {
+      return await syncPolicy({ op, model, headers })
+    } catch (err) {
+      console.warn(`[mogobase/sync] policy threw for ${op} ${model}:`, err)
+      return { allow: false }
+    }
+  }
 
   const sendJson = (ws: WebSocket, payload: unknown) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload))
@@ -279,7 +309,17 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       if (prev?.syncUnsub) {
         try { prev.syncUnsub() } catch {}
       }
-      const unsub = streamChanges(models, (model) => {
+      // Evaluate policy per model; deny → drop from subscription. Build
+      // change-stream pipelines from policy filter so MongoDB only notifies
+      // for docs in scope.
+      const specs: { model: string; pipeline?: any[] }[] = []
+      for (const model of models) {
+        const decision = await evaluatePolicy("watch", model, headers)
+        if (!decision.allow) continue
+        const pipeline = decision.filter ? filterToWatchPipeline(decision.filter) : undefined
+        specs.push({ model, pipeline })
+      }
+      const unsub = streamChanges(specs, (model) => {
         sendJson(ws, { type: "sync-stream", model })
       })
       const current = state.get(id)
@@ -290,10 +330,15 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
 
     if (type === "sync-pull") {
       try {
+        const decision = await evaluatePolicy("pull", data.model, headers)
+        if (!decision.allow) {
+          throw new Error("Forbidden")
+        }
         const rs = await pullChanges({
           model: data.model,
           checkpoint: data.checkpoint ?? null,
           batchSize: data.batchSize,
+          extraFilter: decision.filter,
         })
         sendJson(ws, {
           type: "SyncPullResult",
@@ -316,9 +361,14 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
 
     if (type === "sync-push") {
       try {
+        const decision = await evaluatePolicy("push", data.model, headers)
+        if (!decision.allow) {
+          throw new Error("Forbidden")
+        }
         const rs = await pushChanges({
           model: data.model,
           rows: Array.isArray(data.rows) ? data.rows : [],
+          transform: decision.transform,
         })
         sendJson(ws, {
           type: "SyncPushResult",

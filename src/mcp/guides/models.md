@@ -86,6 +86,38 @@ defineModel(
 )
 ```
 
+## Visibility (`clientFields`) and sync opt-in
+
+`defineModel` accepts two security-relevant options:
+
+```ts
+defineModel(
+  "posts",
+  v.object({
+    title: v.string(),
+    content: v.string(),
+    userId: v.string(),
+    // server-only fields below — present in MongoDB, never shipped to clients
+    auditTrail: v.array(v.any()).optional(),
+    isInternal: v.boolean().optional(),
+  }),
+  {
+    indexSpecs: [{ key: { userId: 1 } }],
+    clientFields: ["title", "content", "userId"],
+    sync: true,
+  }
+)
+```
+
+| Option | Effect |
+| --- | --- |
+| `clientFields: string[]` | Allowlist of fields shipped to / accepted from clients. Engine fields (`_id`, `createdAt`, `updatedAt`, `deletedAt`) are always included. Used by both `filterClientFields()` (online flow) and the sync engine (pull projection + push allowlist). Omit for no restriction. |
+| `sync: true` | Opt the model into mogobase sync. Default-deny — pull/push/watch on a model without `sync: true` throws. Independent from `clientFields`. |
+
+Use `clientFields` whenever you have server-only fields you don't want
+clients to read or write. Sync-enabled models almost always need it; online-
+only models can use it too — see `filterClientFields` in the handlers guide.
+
 ## ObjectId
 
 Import `Id` from `mogobase/db` for server-side ObjectId construction:

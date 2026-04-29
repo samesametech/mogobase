@@ -179,6 +179,51 @@ The handler hardcodes `paginatedField: "_id"` — that is the source of truth fo
 
 If the handler enriches rows from other collections (e.g., `post.category`), call `ctx.watch("categories")` too — every watched collection triggers a full refetch on change, so category-name edits propagate into the rendered posts.
 
+## Filtering server-only fields out of return values
+
+When a model has `clientFields` set on `defineModel`, online handlers should
+strip server-only fields before returning. The runtime ships
+`filterClientFields(model, input)` for this:
+
+```ts
+import { query, v, filterClientFields } from "mogobase/runtime"
+import { Id } from "mogobase/db"
+
+query("posts.get", {
+  args: v.object({ id: v.string() }),
+  handler: async ({ id }, { db, watch }) => {
+    watch("posts")
+    const doc = await db.model("posts").findOne({ _id: new Id(id) })
+    if (!doc) return null
+    return filterClientFields("posts", doc)
+  },
+})
+```
+
+Behavior:
+
+- Looks up the model's `clientFields` allowlist; projects each doc to
+  `clientFields ∪ engine fields` (`_id`, `createdAt`, `updatedAt`,
+  `deletedAt`).
+- If the model has no `clientFields` configured, returns `input` unchanged.
+- Handles three input shapes:
+  - single document → projected document
+  - array of documents → array of projected documents
+  - paginated result `{ results: [...], hasNext, ... }` → same shape with
+    `results` projected, other fields preserved.
+
+The same allowlist also enforces the sync engine's pull projection and push
+strip. Setting `clientFields` once on `defineModel` covers both transports.
+
+For enrichment fields (e.g. `post.category` joined from another collection),
+project the base doc first, then attach the enrichment:
+
+```ts
+const projected: any = filterClientFields("posts", doc)
+if (doc.categoryId) projected.category = await categoryByIdLoader.load(doc.categoryId)
+return projected
+```
+
 ## Naming conventions
 
 - Query names are verbs or noun+verbs: `listTodos`, `getUser`, `searchPosts`.

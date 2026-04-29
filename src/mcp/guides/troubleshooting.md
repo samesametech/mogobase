@@ -108,6 +108,70 @@ The server no longer tracks per-window boundaries — the handler's own `MongoPa
 
 Both tabs must be using the same `dbName` on the `MogobaseProvider`. If different names are in play, the BroadcastChannel topic (`mogobase-watermelon-<dbName>` or the RxDB equivalent) is different and messages aren't shared. Also confirm you're not in a context where `BroadcastChannel` is unavailable (older browsers, some WebView embeddings).
 
+## Sync: `Model "X" is not configured for sync`
+
+The model must opt into sync explicitly (default-deny):
+
+```ts
+defineModel("posts", schema, { sync: true })
+```
+
+Common cause: the server's auto-loader only loads `./mogobase/*.ts`. If
+sync-mode handlers live in a separate folder (e.g. `./mogobase-sync/*.ts`)
+they only register on the client, so the server never sees `sync: true`.
+Either move the `defineModel` call into a file under `./mogobase/`, or have
+the custom `server.ts` load both folders. The `mogobase install` template
+loads only `./mogobase/`; extend the loader if you split the folders.
+
+## Sync: client gets 403 / `Forbidden` on every pull or push
+
+The `SyncPolicy` denied the request. Default-deny means a missing or
+mis-wired policy returns `Forbidden` for everything. Check:
+
+1. The policy is wired into both transports — `attachMogobaseWebSocket(server, "/ws", { syncPolicy })` in `server.ts` AND the same policy imported in `app/api/sync/route.ts`.
+2. The policy returns `{allow: true}` for the model in question. Default behavior for unknown models should be `{allow: false}` — make sure the model name matches exactly.
+3. The session lookup inside the policy is finding the user. Better-auth and similar libraries accept either a Node `IncomingMessage` headers object or a WHATWG `Headers` instance, but only when called with the right signature; an undefined/empty session means `{allow: false}`.
+4. Policy throws are logged as `[mogobase/sync] policy threw …` and converted to `{allow: false}`.
+
+## Sync: client sees other users' data
+
+`filter` is the per-user scoping mechanism — without it, sync is allowed
+but unscoped, and every authenticated user sees every doc.
+
+```ts
+return { allow: true, filter: { userId: session.user.id }, transform: ... }
+```
+
+Don't try to filter inside `transform` — it only runs on push, not pull.
+The `filter` is merged into the pull query (`$and` with the `updatedAt >
+checkpoint` filter) and translated to a change-stream `$match` pipeline so
+MongoDB only notifies for in-scope docs.
+
+## Sync: cross-tenant write succeeds when it should fail
+
+Either the `transform` is missing, or it returns the doc unchanged for a
+foreign-tenant write. The expected pattern:
+
+```ts
+transform: (doc, existing) => {
+  if (existing && existing.userId !== userId) {
+    throw new Error("Forbidden")  // becomes a conflict, server doc preserved
+  }
+  return { ...doc, userId }       // force the field even on create
+}
+```
+
+Throwing inside `transform` is the kill switch — the row is treated as a
+conflict, the server's existing version is returned, and storage is not
+touched.
+
+## Sync: client docs missing fields after pull
+
+The model's `clientFields` allowlist is dropping them. The sync engine
+projects pulls to `clientFields ∪ {_id, createdAt, updatedAt, deletedAt}`.
+Either add the field to `clientFields`, or remove the option entirely if no
+restriction is needed.
+
 ## Changing hooks doesn't take effect
 
 Hooks are copied into `@/hooks` as templates. Edit them directly in your project — changes in `node_modules/mogobase/src/client/hooks` don't propagate.

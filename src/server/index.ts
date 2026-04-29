@@ -7,7 +7,17 @@ import {
   runMutation,
   v,
 } from "@/server/handlers"
-import { attachMogobaseWebSocket } from "@/server/attachWs"
+import { attachMogobaseWebSocket, type AttachMogobaseOptions } from "@/server/attachWs"
+import type {
+  SyncOperation,
+  SyncPolicy,
+  SyncPolicyContext,
+  SyncPolicyDecision,
+  SyncPushTransform,
+  SyncPullOptions,
+  SyncPushOptions,
+  SyncStreamSpec,
+} from "@/server/sync"
 
 const PaginationQueryArgs = v.object({
   limit: v.number(),
@@ -28,4 +38,15 @@ export {
   attachMogobaseWebSocket,
   v,
   PaginationQueryArgs,
+}
+export type {
+  AttachMogobaseOptions,
+  SyncOperation,
+  SyncPolicy,
+  SyncPolicyContext,
+  SyncPolicyDecision,
+  SyncPushTransform,
+  SyncPullOptions,
+  SyncPushOptions,
+  SyncStreamSpec,
 }
