@@ -310,6 +310,41 @@ yarn dev
 | `NEXT_MOGOBASE_URL`  | *(same-origin)*             | Override client WS/HTTP base URL             |
 | `MOGOBASE_URL`       | *(same-origin)*             | SSR override for the same                    |
 
+## Scaling
+
+mogobase uses a process-level shared change-stream hub (`src/server/streamHub.ts`)
+so the number of MongoDB change streams open per Node process is bounded by
+the number of *active models*, not the number of connected sockets. Every
+incoming change is filtered in JS against each subscriber's policy filter
+using `runtime/filterMatcher`.
+
+`useQuery` refetches are coalesced via `refetchScheduler`: a 100ms trailing-edge
+debounce per `(socket, query, args)` plus at-most-one-in-flight + one-queued
+backpressure. Configure with:
+
+```ts
+attachMogobaseWebSocket(server, "/ws", { refetchDebounceMs: 100 })
+```
+
+### Practical capacity
+
+Approximate ceilings on a single Node process backed by a moderately sized
+MongoDB cluster (M30+):
+
+- **5K–10K concurrent WebSocket users** per Node process before event-loop
+  saturation matters more than MongoDB load.
+- **30K–50K concurrent users** behind a 4-node sticky load balancer for typical
+  per-user-data SaaS workloads.
+- **100K+** for sync-heavy / read-light workloads where the per-user filter
+  effectively shards traffic.
+
+### Known limits
+
+- **Per-process scope.** Horizontal scaling multiplies streams by node count.
+  A Redis pub/sub layer would dedupe across processes; not built-in.
+- **Filter operators.** `streamHub` evaluates `$eq`/`$ne`/`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`/`$exists`/`$regex`/`$and`/`$or`/`$not` in JS. Operators outside this set (`$expr`, `$where`, `$elemMatch`, `$text`) throw at subscribe; callers can fall back to passing a `Document[]` aggregation pipeline to `ctx.watch()` for legacy per-socket pipeline filtering.
+- **Hot shared queries.** A query subscribed by N clients still triggers N refetch handler runs per debounce window. Result caching / request collapsing is not in this version.
+
 ## Package entry points
 
 | Import                 | Use from       | Purpose                                                |

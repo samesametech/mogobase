@@ -291,6 +291,21 @@ export async function startRxSync(db: RxDatabase, options: SyncOptions = {}): Pr
       cancelled = true
       if (reconnectTimer) clearTimeout(reconnectTimer)
       reconnectTimer = null
+      // Reject any pending pull/push waiters so their resolvers don't pin
+      // RxDB's replication state and so the caller's await chain unwinds.
+      // The ws.onclose handler also drains these, but if cancel() runs while
+      // ws is still in CLOSING state (or already null), onclose may not fire.
+      const cancelErr = new Error("sync cancelled")
+      for (const queue of pendingPulls.values()) {
+        for (const p of queue) p.reject(cancelErr)
+        queue.length = 0
+      }
+      pendingPulls.clear()
+      for (const queue of pendingPushes.values()) {
+        for (const p of queue) p.reject(cancelErr)
+        queue.length = 0
+      }
+      pendingPushes.clear()
       try { ws?.close() } catch {}
       ws = null
       for (const r of replications) {
@@ -302,6 +317,7 @@ export async function startRxSync(db: RxDatabase, options: SyncOptions = {}): Pr
       }
       subjects.clear()
       setStatus("idle")
+      statusSubs.clear()
     },
     onStatusChange(cb) {
       statusSubs.add(cb)

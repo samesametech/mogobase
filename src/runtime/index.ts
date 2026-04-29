@@ -24,6 +24,8 @@ import {
 } from "./models"
 import { isServer, isClient } from "./env"
 import { MongoPaging, type PagingParams, type PagingResult } from "./paging"
+import { matches, matchesValue, isSupportedFilter, getPath, deepEqual } from "./filterMatcher"
+import type { MongoFilter } from "./filterMatcher"
 
 const PaginationQueryArgs = v.object({
   limit: v.number(),
@@ -53,5 +55,10 @@ export {
   isServer,
   isClient,
   MongoPaging,
+  matches,
+  matchesValue,
+  isSupportedFilter,
+  getPath,
+  deepEqual,
 }
-export type { ModelDef, ModelOptions, PagingParams, PagingResult }
+export type { ModelDef, ModelOptions, PagingParams, PagingResult, MongoFilter }

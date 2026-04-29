@@ -365,13 +365,18 @@ export async function startWatermelonSync(
     },
     async cancel() {
       cancelled = true
+      pendingTrigger = false
       if (reconnectTimer) clearTimeout(reconnectTimer)
       reconnectTimer = null
       try { localSub?.unsubscribe() } catch {}
       localSub = null
+      // Reject pending pulls/pushes before closing ws, in case onclose isn't
+      // fired synchronously by ws.close() — keeps caller awaits from hanging.
+      rejectPending()
       try { ws?.close() } catch {}
       ws = null
       setStatus("idle")
+      statusSubs.clear()
     },
     onStatusChange(cb) {
       statusSubs.add(cb)

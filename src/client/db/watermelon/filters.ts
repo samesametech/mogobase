@@ -1,101 +1,14 @@
-// JS-side Mongo filter matcher + update applier for the WatermelonDB backend.
-// The storage strategy is one JSON blob per record (see ./adapter) so queries
-// cannot push down into Watermelon's Q.* builder — they are evaluated here on
-// the decoded document. This keeps consumer handler code (written against the
-// MongoDB driver shape) working unchanged on the offline path.
+// src/client/db/watermelon/filters.ts
+//
+// Watermelon-specific JSON-blob helpers + a re-export of the shared filter
+// matcher from @/runtime/filterMatcher. The matcher used to live here; it
+// was extracted so server/streamHub can use the same evaluator MongoDB-side
+// without duplicating logic.
 
-export type MongoFilter = any
+export { matches, matchesValue, getPath, deepEqual } from "@/runtime/filterMatcher"
+export type { MongoFilter } from "@/runtime/filterMatcher"
+
 export type MongoUpdate = any
-
-export function matches(doc: any, filter: MongoFilter): boolean {
-  if (!filter || typeof filter !== "object") return true
-  for (const [key, cond] of Object.entries(filter)) {
-    if (key === "$and") {
-      if (!(cond as any[]).every((c) => matches(doc, c))) return false
-      continue
-    }
-    if (key === "$or") {
-      if (!(cond as any[]).some((c) => matches(doc, c))) return false
-      continue
-    }
-    if (key === "$not") {
-      if (matches(doc, cond)) return false
-      continue
-    }
-    const val = getPath(doc, key)
-    if (!matchesValue(val, cond)) return false
-  }
-  return true
-}
-
-export function matchesValue(val: any, cond: any): boolean {
-  if (cond === null) return val === null || val === undefined
-  if (typeof cond !== "object" || Array.isArray(cond) || cond instanceof Date) {
-    return deepEqual(val, cond)
-  }
-  const ops = Object.keys(cond)
-  if (!ops.some((k) => k.startsWith("$"))) return deepEqual(val, cond)
-  for (const op of ops) {
-    const target = cond[op]
-    switch (op) {
-      case "$eq":
-        if (!deepEqual(val, target)) return false
-        break
-      case "$ne":
-        if (deepEqual(val, target)) return false
-        break
-      case "$gt":
-        if (!(val > target)) return false
-        break
-      case "$gte":
-        if (!(val >= target)) return false
-        break
-      case "$lt":
-        if (!(val < target)) return false
-        break
-      case "$lte":
-        if (!(val <= target)) return false
-        break
-      case "$in":
-        if (!Array.isArray(target) || !target.some((t) => deepEqual(val, t))) return false
-        break
-      case "$nin":
-        if (Array.isArray(target) && target.some((t) => deepEqual(val, t))) return false
-        break
-      case "$exists":
-        if (target && val === undefined) return false
-        if (!target && val !== undefined) return false
-        break
-      case "$regex": {
-        const re = target instanceof RegExp ? target : new RegExp(target, cond.$options || "")
-        if (typeof val !== "string" || !re.test(val)) return false
-        break
-      }
-      case "$options":
-        break
-      default:
-        console.warn(`[mogobase/watermelon] unsupported operator ${op}`)
-    }
-  }
-  return true
-}
-
-export function getPath(obj: any, path: string): any {
-  if (!path.includes(".")) return obj?.[path]
-  return path.split(".").reduce((o, k) => (o == null ? o : o[k]), obj)
-}
-
-export function deepEqual(a: any, b: any): boolean {
-  if (a === b) return true
-  if (a == null || b == null) return false
-  if (typeof a !== typeof b) return false
-  if (typeof a !== "object") return false
-  if (Array.isArray(a) !== Array.isArray(b)) return false
-  const ka = Object.keys(a),
-    kb = Object.keys(b)
-  if (ka.length !== kb.length) return false
-  return ka.every((k) => deepEqual(a[k], b[k]))
-}
 
 export function applyUpdate(doc: any, update: MongoUpdate): any {
   if (!update || typeof update !== "object") return doc

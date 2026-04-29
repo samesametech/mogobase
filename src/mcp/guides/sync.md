@@ -206,6 +206,16 @@ hard-delete events — clients miss tombstones and the doc lives forever in
 their local store. If you bypass the wrapper for a hard delete on a synced
 model, sync correctness breaks for clients with policy filters.
 
+### Shared change streams
+
+`streamChanges` and the WebSocket sync-subscribe path both go through a
+process-level `streamHub` (`src/server/streamHub.ts`). One MongoDB change
+stream is opened per active model regardless of how many clients are
+subscribed; the policy `filter` returned by `syncPolicy({op:"watch",...})`
+is evaluated in JS via `runtime/filterMatcher` to decide which clients
+receive each event. This bounds MongoDB cursor count by *number of synced
+models*, not number of connected users.
+
 ## Wire protocol
 
 All sync traffic is multiplexed onto the same `/ws` socket the existing

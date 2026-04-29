@@ -32,15 +32,28 @@
 //     fullDocument, so a `{$match: {"fullDocument.userId": x}}` pipeline drops
 //     them and clients miss tombstones.
 
-import type { ChangeStream, Document } from "mongodb"
+import type { Document } from "mongodb"
 
 import DB from "@/db"
+import { createStreamHub, type StreamHub } from "./streamHub"
 import type { SyncDoc, SyncPushRow } from "@/client/sync-types"
 import {
   getClientFields,
   isSyncEnabled,
   CLIENT_ENGINE_FIELDS,
 } from "@/runtime/models"
+
+let _sharedHub: StreamHub | null = null
+function sharedHub(): StreamHub {
+  if (_sharedHub) return _sharedHub
+  _sharedHub = createStreamHub({
+    openStream: async (model) => {
+      await DB.connect()
+      return DB.model(model).watch([], { fullDocument: "updateLookup" }) as any
+    },
+  })
+  return _sharedHub
+}
 
 const EPOCH = 0
 const MAX_PUSH_ROWS = 500
@@ -308,8 +321,8 @@ export function streamChanges(
   specs: SyncStreamSpec[],
   onEvent: (model: string) => void
 ): () => void {
-  const streams: ChangeStream[] = []
   let cancelled = false
+  const unsubs: (() => Promise<void>)[] = []
 
   // Connect lazily so callers don't have to await.
   ;(async () => {
@@ -317,17 +330,24 @@ export function streamChanges(
       await DB.connect()
       if (cancelled) return
       for (const spec of specs) {
+        if (cancelled) return
         const model = typeof spec === "string" ? spec : spec.model
-        const pipeline = typeof spec === "string" ? [] : (spec.pipeline ?? [])
+        // Legacy pipeline specs don't carry a structured filter — fall back to
+        // an unfiltered hub subscription (matches all docs for that model).
+        // The primary new path in attachWs.ts subscribes via hub.subscribe
+        // directly and never calls streamChanges anymore.
         try {
-          const stream = DB.model(model).watch(pipeline, { fullDocument: "updateLookup" })
-          stream.on("change", () => onEvent(model))
-          stream.on("error", (err) => {
-            console.warn(`[mogobase/sync] change stream error for ${model}:`, err)
-          })
-          streams.push(stream)
+          const unsub = await sharedHub().subscribe(model, undefined, () => onEvent(model))
+          // Caller may have invoked the cleanup fn between the await above and
+          // this push. If so, the cleanup-path already iterated `unsubs`, so
+          // unwind this subscription inline rather than orphaning it.
+          if (cancelled) {
+            unsub().catch(() => {})
+            return
+          }
+          unsubs.push(unsub)
         } catch (err) {
-          console.warn(`[mogobase/sync] failed to open change stream for ${model}:`, err)
+          console.warn(`[mogobase/sync] streamChanges hub.subscribe failed for ${model}:`, err)
         }
       }
     } catch (err) {
@@ -337,12 +357,7 @@ export function streamChanges(
 
   return () => {
     cancelled = true
-    for (const s of streams) {
-      try {
-        s.close()
-      } catch {}
-    }
-    streams.length = 0
+    for (const u of unsubs) { u().catch(() => {}) }
   }
 }
 

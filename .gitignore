@@ -37,3 +37,6 @@ lerna-debug.log*
 .claude
 .playwright-mcp
 docs
+
+.mongodb-binaries/
+coverage/

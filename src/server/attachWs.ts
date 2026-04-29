@@ -8,11 +8,13 @@ import DB from "@/db"
 import {
   pullChanges,
   pushChanges,
-  streamChanges,
-  filterToWatchPipeline,
   type SyncPolicy,
   type SyncPolicyDecision,
 } from "./sync"
+import { createStreamHub, type StreamHub } from "./streamHub"
+import { createRefetchScheduler } from "./refetchScheduler"
+import { stableStringify } from "./stableStringify"
+import type { MongoFilter } from "@/runtime/filterMatcher"
 
 type PaginatedSub = {
   name: string
@@ -35,10 +37,13 @@ type SocketState = {
   changeStreams?: ChangeStream[]
   paginated?: PaginatedSub
   syncUnsub?: () => void
+  hubUnsubs?: (() => Promise<void>)[]
+  schedulerKeys?: Set<string>
 }
 
 export type AttachMogobaseOptions = {
   syncPolicy?: SyncPolicy
+  refetchDebounceMs?: number
 }
 
 export function attachMogobaseWebSocket(
@@ -49,6 +54,15 @@ export function attachMogobaseWebSocket(
   const wss = new WebSocketServer({ noServer: true })
   const state = new Map<string, SocketState>()
   const syncPolicy = options.syncPolicy
+
+  const debounceMs = options.refetchDebounceMs ?? 100
+  const scheduler = createRefetchScheduler({ debounceMs })
+  const hub: StreamHub = createStreamHub({
+    openStream: async (model) => {
+      await DB.connect()
+      return DB.model(model).watch([], { fullDocument: "updateLookup" }) as any
+    },
+  })
 
   async function evaluatePolicy(
     op: "pull" | "push" | "watch",
@@ -88,6 +102,26 @@ export function attachMogobaseWebSocket(
     }
     const current = state.get(id)
     if (current) state.set(id, { ...current, paginated: undefined })
+  }
+
+  // Tear down all hub subscriptions and pending scheduler keys for a socket.
+  // Used when transitioning between query / paginated-query modes — without
+  // this, prior-mode hub subs stay open until socket close.
+  const clearWatchers = async (id: string) => {
+    const s = state.get(id)
+    if (!s) return
+    if (s.schedulerKeys) {
+      for (const k of s.schedulerKeys) scheduler.cancel(k)
+    }
+    if (s.hubUnsubs) {
+      for (const u of s.hubUnsubs) {
+        try { await u() } catch {}
+      }
+    }
+    const refreshed = state.get(id)
+    if (refreshed) {
+      state.set(id, { ...refreshed, hubUnsubs: [], schedulerKeys: new Set() })
+    }
   }
 
   const bindStreamToWs = (ws: WebSocket, cs: ChangeStream) => {
@@ -145,7 +179,9 @@ export function attachMogobaseWebSocket(
     name: string,
     args: any
   ) {
+    await closeStreams(id)
     await closePaginatedSub(id)
+    await clearWatchers(id)
     await DB.connect()
 
     const paginationOpts = args?.paginationOpts || {}
@@ -153,6 +189,7 @@ export function attachMogobaseWebSocket(
     delete baseArgs.paginationOpts
 
     const pendingStreams: ChangeStream[] = []
+    const hubSpecsForPaginated: { model: string; filter: MongoFilter | undefined }[] = []
     const sub: PaginatedSub = {
       name,
       baseArgs,
@@ -173,11 +210,16 @@ export function attachMogobaseWebSocket(
         db: DB,
         watch: (modelName: string, pipelineOrFilter?: Document[] | Document) => {
           if (ws.readyState !== ws.OPEN) return
-          const pipeline = Array.isArray(pipelineOrFilter) ? (pipelineOrFilter as Document[]) : undefined
-          const cs = DB.model(modelName).watch(pipeline, {
-            fullDocument: "updateLookup",
-          } as ChangeStreamOptions)
-          pendingStreams.push(cs)
+          const isLegacyPipeline = Array.isArray(pipelineOrFilter)
+          if (isLegacyPipeline) {
+            const cs = DB.model(modelName).watch(pipelineOrFilter as Document[], {
+              fullDocument: "updateLookup",
+            } as ChangeStreamOptions)
+            pendingStreams.push(cs)
+            return
+          }
+          const filter = (pipelineOrFilter as MongoFilter | undefined) ?? undefined
+          hubSpecsForPaginated.push({ model: modelName, filter })
         },
       })
 
@@ -204,9 +246,38 @@ export function attachMogobaseWebSocket(
 
       state.set(id, { ...existing, paginated: sub })
 
+      const paginatedKey = `${id}:paginated:${name}:${stableStringify(baseArgs)}`
       for (const cs of pendingStreams) {
         bindStreamToWs(ws, cs)
-        cs.on("change", () => scheduleRefetch(id, ws, sub))
+        cs.on("change", () => {
+          scheduler.schedule(paginatedKey, async () => {
+            scheduleRefetch(id, ws, sub)
+          })
+          const s = state.get(id)
+          s?.schedulerKeys?.add(paginatedKey)
+        })
+      }
+
+      const hubUnsubsForPaginated: (() => Promise<void>)[] = []
+      for (const spec of hubSpecsForPaginated) {
+        try {
+          const unsub = await hub.subscribe(spec.model, spec.filter, () => {
+            if (ws.readyState !== ws.OPEN) return
+            scheduler.schedule(paginatedKey, async () => {
+              scheduleRefetch(id, ws, sub)
+            })
+            const s = state.get(id)
+            s?.schedulerKeys?.add(paginatedKey)
+          })
+          hubUnsubsForPaginated.push(unsub)
+        } catch (err) {
+          console.warn(`[mogobase/attachWs] paginated hub.subscribe failed:`, err)
+        }
+      }
+      const cur = state.get(id)
+      if (cur) {
+        cur.hubUnsubs = (cur.hubUnsubs ?? []).concat(hubUnsubsForPaginated)
+        state.set(id, cur)
       }
 
       sendJson(ws, { type: "PaginatedQueryResult", success: true, data: rs })
@@ -309,22 +380,25 @@ export function attachMogobaseWebSocket(
       if (prev?.syncUnsub) {
         try { prev.syncUnsub() } catch {}
       }
-      // Evaluate policy per model; deny → drop from subscription. Build
-      // change-stream pipelines from policy filter so MongoDB only notifies
-      // for docs in scope.
-      const specs: { model: string; pipeline?: any[] }[] = []
+      const unsubFns: (() => Promise<void>)[] = []
       for (const model of models) {
         const decision = await evaluatePolicy("watch", model, headers)
         if (!decision.allow) continue
-        const pipeline = decision.filter ? filterToWatchPipeline(decision.filter) : undefined
-        specs.push({ model, pipeline })
+        try {
+          const unsub = await hub.subscribe(model, decision.filter, () => {
+            sendJson(ws, { type: "sync-stream", model })
+          })
+          unsubFns.push(unsub)
+        } catch (err) {
+          console.warn(`[mogobase/attachWs] sync hub.subscribe failed for ${model}:`, err)
+        }
       }
-      const unsub = streamChanges(specs, (model) => {
-        sendJson(ws, { type: "sync-stream", model })
-      })
+      const aggregateUnsub = () => {
+        for (const u of unsubFns) { u().catch(() => {}) }
+      }
       const current = state.get(id)
-      if (current) state.set(id, { ...current, syncUnsub: unsub })
-      else unsub()
+      if (current) state.set(id, { ...current, syncUnsub: aggregateUnsub })
+      else aggregateUnsub()
       return
     }
 
@@ -391,31 +465,60 @@ export function attachMogobaseWebSocket(
 
     if (type === "query") {
       await closeStreams(id)
+      await clearWatchers(id)
+
+      const queryKey = `${id}:${name}:${stableStringify(args ?? {})}`
+
       const run = async (noWatch?: boolean) => {
         await DB.connect()
         try {
           const rs = await handlers._runQuery(name, args, {
             headers,
             db: DB,
-            watch: (modelName: string, pipelineOrFilter?: Document[] | Document, options?: any) => {
+            watch: (modelName: string, pipelineOrFilter?: Document[] | Document, watchOpts?: any) => {
               if (noWatch) return
               if (ws.readyState !== ws.OPEN) return
               const s = state.get(id)
               if (!s) return
-              const isArrayPipeline = Array.isArray(pipelineOrFilter)
-              const pipeline = isArrayPipeline ? (pipelineOrFilter as Document[]) : undefined
-              const changeStream = DB.model(modelName).watch(pipeline, {
-                ...(options || {}),
-                fullDocument: "updateLookup",
-                fullDocumentBeforeChange: "whenAvailable",
-              } as ChangeStreamOptions)
-              bindStreamToWs(ws, changeStream)
-              const streams: ChangeStream[] = s.changeStreams || []
-              streams.push(changeStream)
-              state.set(id, { ...s, changeStreams: streams })
-              changeStream.on("change", () => {
-                run(true)
-              })
+
+              const isLegacyPipeline = Array.isArray(pipelineOrFilter)
+              if (isLegacyPipeline) {
+                const changeStream = DB.model(modelName).watch(pipelineOrFilter as Document[], {
+                  ...(watchOpts || {}),
+                  fullDocument: "updateLookup",
+                  fullDocumentBeforeChange: "whenAvailable",
+                } as ChangeStreamOptions)
+                bindStreamToWs(ws, changeStream)
+                const streams: ChangeStream[] = s.changeStreams || []
+                streams.push(changeStream)
+                state.set(id, { ...s, changeStreams: streams })
+                changeStream.on("change", () => {
+                  scheduler.schedule(queryKey, async () => { await run(true) })
+                  s.schedulerKeys?.add(queryKey)
+                })
+                return
+              }
+
+              const filter = (pipelineOrFilter as MongoFilter | undefined) ?? undefined
+              hub
+                .subscribe(modelName, filter, () => {
+                  if (ws.readyState !== ws.OPEN) return
+                  scheduler.schedule(queryKey, async () => { await run(true) })
+                  s.schedulerKeys?.add(queryKey)
+                })
+                .then((unsub) => {
+                  const cur = state.get(id)
+                  if (!cur || ws.readyState !== ws.OPEN) {
+                    unsub().catch(() => {})
+                    return
+                  }
+                  cur.hubUnsubs = cur.hubUnsubs || []
+                  cur.hubUnsubs.push(unsub)
+                  state.set(id, cur)
+                })
+                .catch((err) => {
+                  console.warn(`[mogobase/attachWs] hub.subscribe failed for ${modelName}:`, err)
+                })
             },
           })
           sendJson(ws, { type: "QueryResult", success: true, data: rs })
@@ -452,12 +555,26 @@ export function attachMogobaseWebSocket(
       if (s?.syncUnsub) {
         try { s.syncUnsub() } catch {}
       }
+      if (s?.hubUnsubs) {
+        for (const u of s.hubUnsubs) { try { await u() } catch {} }
+      }
+      if (s?.schedulerKeys) {
+        for (const k of s.schedulerKeys) scheduler.cancel(k)
+      }
       state.delete(id)
     })
   })
 
+  // Node.js HTTP server only calls server.emit('upgrade', ...) when at least one
+  // 'upgrade' listener is registered. In production (Next.js custom server), the
+  // upgrade listener already exists. For standalone HTTP servers (tests, custom
+  // setups), we add a no-op listener so the emit-shadow below is reachable.
+  if (server.listenerCount("upgrade") === 0) {
+    server.on("upgrade", () => {})
+  }
+
   const origEmit = server.emit.bind(server)
-  server.emit = function (event: string, ...args: any[]): boolean {
+  const patchedEmit = function (event: string, ...args: any[]): boolean {
     if (event === "upgrade") {
       const req = args[0] as IncomingMessage
       const socket = args[1]
@@ -476,7 +593,17 @@ export function attachMogobaseWebSocket(
       }
     }
     return origEmit(event, ...args)
-  } as any
+  } as typeof server.emit
+  server.emit = patchedEmit
 
-  return wss
+  const stop = async () => {
+    // Restore the upgrade-emit shadow so this attach can be released by GC and
+    // a subsequent attach (or a different upgrade handler) sees a clean server.
+    if (server.emit === patchedEmit) server.emit = origEmit
+    scheduler.cancelAll()
+    try { await hub.shutdown() } catch {}
+    await new Promise<void>((resolve) => wss.close(() => resolve()))
+  }
+
+  return Object.assign(wss, { stop }) as typeof wss & { stop: () => Promise<void> }
 }

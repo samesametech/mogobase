@@ -1,7 +1,7 @@
 {
   "name": "mogobase",
   "type": "module",
-  "version": "2.8.0",
+  "version": "3.0.0",
   "description": "Lightweight Next.js + MongoDB backend with typed handlers, WebSocket live queries, and opt-in offline / local-first sync.",
   "main": "lib/index.js",
   "types": "types/index.d.ts",
@@ -89,6 +89,10 @@
     "start": "node lib/server/start.js",
     "deploy": "wrangler deploy --minify",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "vitest run -c vitest.unit.config.ts",
+    "test:integration": "vitest run -c vitest.integration.config.ts",
+    "test:watch": "vitest -c vitest.unit.config.ts",
     "prepublish": "npm run build"
   },
   "dependencies": {
@@ -112,9 +116,14 @@
     "@types/node": "^25.0.3",
     "@types/react": "^19.2.8",
     "@types/ws": "^8.18.1",
+    "@vitest/ui": "^1.6.1",
+    "mongo-cursor-pagination": "^9.1.1",
     "mongodb": "^6.21.0",
+    "mongodb-memory-server": "^9.5.0",
     "rxdb": "^17.1.0",
     "tsc-alias": "^1.8.16",
+    "vite-tsconfig-paths": "^4.3.2",
+    "vitest": "^1.6.1",
     "wrangler": "^4.4.0"
   }
 }

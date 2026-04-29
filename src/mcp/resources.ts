@@ -15,6 +15,7 @@ const GUIDES: Guide[] = [
   { slug: "offline-backends", title: "Offline Backends", description: "RxDB vs WatermelonDB — when to pick each, caveats, interface." },
   { slug: "sync", title: "Sync Mode (Local-First)", description: "Enabling sync, wire protocol, updatedAt semantics, conflict resolution, limitations." },
   { slug: "troubleshooting", title: "Troubleshooting", description: "Common errors: WS not connecting, handlers not registering, offline gotchas." },
+  { slug: "scaling", title: "Scaling and Performance", description: "Shared change-stream hub, refetch debounce, backpressure, capacity ceilings." },
 ]
 
 function guidesDir(): string {

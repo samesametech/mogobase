@@ -186,6 +186,18 @@ export class MogobaseWatermelonDB {
     }
   }
 
+  // Close the cross-tab BroadcastChannel. The browser auto-closes it when the
+  // tab unloads, but tests, HMR boundaries, and SSR-into-CSR transitions can
+  // re-import this module and orphan the prior channel — call destroy() in
+  // those teardown paths.
+  async destroy(): Promise<void> {
+    await this.stopSync()
+    if (this._bc) {
+      try { this._bc.close() } catch {}
+      this._bc = undefined
+    }
+  }
+
   get db(): Database {
     return this._ensureDb()
   }
