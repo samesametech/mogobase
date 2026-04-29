@@ -18,11 +18,38 @@ function stripMeta(doc: any): any {
   return rest
 }
 
+// RxDB-on-Dexie's mingo evaluator + IndexedDB index path don't match literal
+// `null` against indexed fields (Dexie can't index `null`). We rewrite
+// `{field: null}` and `{field: {$eq: null}}` to `{field: {$in: [null]}}`,
+// which the same evaluator treats correctly.
+function rewriteNullEq(filter: any): any {
+  if (filter === null || typeof filter !== "object") return filter
+  if (Array.isArray(filter)) return filter.map(rewriteNullEq)
+  const out: any = {}
+  for (const [k, v] of Object.entries(filter)) {
+    if (v === null) {
+      out[k] = { $in: [null] }
+    } else if ((k === "$and" || k === "$or" || k === "$nor") && Array.isArray(v)) {
+      out[k] = v.map(rewriteNullEq)
+    } else if (v && typeof v === "object" && !Array.isArray(v)) {
+      const ops: any = {}
+      for (const [op, opv] of Object.entries(v as any)) ops[op] = opv
+      if ("$eq" in ops && ops.$eq === null) {
+        delete ops.$eq
+        const merged = Array.isArray(ops.$in) ? Array.from(new Set([...ops.$in, null])) : [null]
+        ops.$in = merged
+      }
+      out[k] = ops
+    } else {
+      out[k] = v
+    }
+  }
+  return out
+}
+
 function toSelector(filter: MongoFilter): any {
-  // RxDB wraps the Mongo-style filter in `selector`. buildMongoFilters always
-  // appends `deletedAt: null` — RxDB understands that directly.
   if (!filter || typeof filter !== "object") return {}
-  return filter
+  return rewriteNullEq(filter)
 }
 
 function injectUpdatedAt(update: MongoUpdate, now: number): MongoUpdate {

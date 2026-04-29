@@ -137,7 +137,9 @@ export function attachMogobaseWebSocket(
     if (!s || s.paginated !== sub || ws.readyState !== ws.OPEN) return
 
     const paginationOpts = {
-      limit: sub.loadedCount,
+      // Floor at sub.limit so a static (non-virtualized) list that never
+      // calls loadNext still picks up newly-appended rows past loadedCount.
+      limit: Math.max(sub.loadedCount, sub.limit),
       sortAscending: sub.sortAscending,
       sortCaseInsensitive: sub.sortCaseInsensitive,
     }
