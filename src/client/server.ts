@@ -1,5 +1,5 @@
 // Copy this file to the ROOT of your Next.js project as `server.ts`.
-// Run with: npx tsx server.ts (dev) or build & node server.js (prod).
+// Run with: npx tsx server.ts (dev) or build & tsx server.ts (prod).
 //
 // Update package.json scripts:
 //   "dev":   "tsx server.ts",
@@ -11,15 +11,26 @@
 
 import { createServer } from "http"
 import { parse } from "url"
-import { readdirSync } from "fs"
+import { readdirSync, readFileSync } from "fs"
 import { pathToFileURL } from "url"
 import path from "path"
-import next from "next"
 import { config as loadDotenv } from "dotenv"
-import { attachMogobaseWebSocket } from "mogobase/server"
 
 const cwd = process.cwd()
 loadDotenv({ path: [path.join(cwd, ".env"), path.join(cwd, ".env.local")] })
+
+// In production (next build --output=standalone), Next strips
+// next/dist/compiled/webpack/ from the traced node_modules. Loading next
+// then triggers loadWebpackHook() which throws — unless
+// __NEXT_PRIVATE_STANDALONE_CONFIG is set, in which case the throw is
+// suppressed and the parsed value is used as the resolved config. The
+// auto-generated standalone server.js sets this env var; we mirror that
+// by extracting the config from it before importing next.
+try {
+  const autoServer = readFileSync(path.join(cwd, "server.js"), "utf8")
+  const m = autoServer.match(/^const nextConfig = (.+)$/m)
+  if (m) process.env.__NEXT_PRIVATE_STANDALONE_CONFIG = m[1]
+} catch {}
 
 const dev = process.env.NODE_ENV !== "production"
 const hostname = process.env.HOST || "localhost"
@@ -43,6 +54,9 @@ async function loadHandlers() {
 
 async function main() {
   await loadHandlers()
+
+  const { default: next } = await import("next")
+  const { attachMogobaseWebSocket } = await import("mogobase/server")
 
   const app = next({ dev, hostname, port })
   const handle = app.getRequestHandler()

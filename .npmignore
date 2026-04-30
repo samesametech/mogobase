@@ -1,0 +1,60 @@
+# Source (only the bits whitelisted by package.json `files` are published)
+src/
+!src/client/hooks
+!src/client/api
+!src/client/server.ts
+
+# Tests
+tests/
+**/*.test.ts
+**/*.test.js
+**/*.spec.ts
+**/*.spec.js
+vitest.unit.config.ts
+vitest.integration.config.ts
+
+# Build / TS configs not needed at runtime
+tsconfig.json
+tsconfig.test.json
+*.tsbuildinfo
+*.map
+
+# Cloudflare / Wrangler
+wrangler.jsonc
+.wrangler/
+
+# Env / secrets
+.env
+.env.*
+.dev.vars
+
+# Editor / OS / agent state
+.vscode/
+.idea/
+.DS_Store
+.claude/
+.playwright-mcp/
+.prettierrc
+
+# Project-only docs (README is published, the rest is not)
+docs/
+CLAUDE.md
+
+# Logs / coverage / scratch
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+coverage/
+.mongodb-binaries/
+
+# Lockfiles (consumers use their own)
+yarn.lock
+package-lock.json
+
+# Backups
+*.bak
+*.swp

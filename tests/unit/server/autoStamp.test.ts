@@ -1,6 +1,7 @@
 // tests/unit/server/autoStamp.test.ts
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { wrapDbWithAutoStamp } from "@/server/autoStamp"
+import { defineModel } from "@/runtime/models"
 
 // Build a fake db that mirrors the shape used by handler ctx.db.
 // db.model(name) returns a fake collection with the mutation methods we
@@ -77,12 +78,29 @@ describe("wrapDbWithAutoStamp", () => {
     expect(update.$set.updatedAt).toBe(now)
   })
 
-  it("rewrites deleteOne into soft-delete updateOne", async () => {
+  it("passes deleteOne through unchanged for non-sync models", async () => {
     const db = makeFakeDb()
     const wrapped = wrapDbWithAutoStamp(db as any)
     await wrapped.model("widgets").deleteOne({ _id: "x" })
-    // The Proxy should NOT call collection.deleteOne; it should call updateOne
-    // with $set: {deletedAt: now, updatedAt: now}.
+    expect(db.collection.deleteOne).toHaveBeenCalledTimes(1)
+    expect(db.collection.deleteOne).toHaveBeenCalledWith({ _id: "x" })
+    expect(db.collection.updateOne).not.toHaveBeenCalled()
+  })
+
+  it("passes deleteMany through unchanged for non-sync models", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("widgets").deleteMany({ active: false })
+    expect(db.collection.deleteMany).toHaveBeenCalledTimes(1)
+    expect(db.collection.deleteMany).toHaveBeenCalledWith({ active: false })
+    expect(db.collection.updateMany).not.toHaveBeenCalled()
+  })
+
+  it("rewrites deleteOne into soft-delete updateOne when sync is enabled", async () => {
+    defineModel("syncedWidgets", undefined, { sync: true })
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("syncedWidgets").deleteOne({ _id: "x" })
     expect(db.collection.deleteOne).not.toHaveBeenCalled()
     expect(db.collection.updateOne).toHaveBeenCalledTimes(1)
     const update = db.collection.updateOne.mock.calls[0][1]
@@ -90,10 +108,11 @@ describe("wrapDbWithAutoStamp", () => {
     expect(update.$set.updatedAt).toBe(now)
   })
 
-  it("rewrites deleteMany into soft-delete updateMany", async () => {
+  it("rewrites deleteMany into soft-delete updateMany when sync is enabled", async () => {
+    defineModel("syncedWidgets", undefined, { sync: true })
     const db = makeFakeDb()
     const wrapped = wrapDbWithAutoStamp(db as any)
-    await wrapped.model("widgets").deleteMany({ active: false })
+    await wrapped.model("syncedWidgets").deleteMany({ active: false })
     expect(db.collection.deleteMany).not.toHaveBeenCalled()
     expect(db.collection.updateMany).toHaveBeenCalledTimes(1)
     const update = db.collection.updateMany.mock.calls[0][1]

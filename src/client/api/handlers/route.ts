@@ -22,7 +22,7 @@ export async function GET(request: Request) {
       db: DB,
       headers: request.headers,
     })
-    return Response.json(rs)
+    return Response.json(rs ?? null)
   } catch (error) {
     return new Response(`${error}`, { status: 400 })
   }
@@ -38,7 +38,7 @@ export async function POST(request: Request) {
       db: DB,
       headers: request.headers,
     })
-    return Response.json(rs)
+    return Response.json(rs ?? null)
   } catch (error) {
     return new Response(`${error}`, { status: 400 })
   }
