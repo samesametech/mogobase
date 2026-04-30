@@ -1,7 +1,7 @@
 {
   "name": "mogobase",
   "type": "module",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "description": "Lightweight Next.js + MongoDB backend with typed handlers, WebSocket live queries, and opt-in offline / local-first sync.",
   "main": "lib/index.js",
   "types": "types/index.d.ts",
