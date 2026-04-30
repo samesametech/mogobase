@@ -20,7 +20,7 @@ describe("streamHub: refcount lifecycle", () => {
   it("does not open a second stream for additional subscribers on the same model", async () => {
     const { hub, opened } = setup()
     const u1 = await hub.subscribe("orders", undefined, vi.fn())
-    const u2 = await hub.subscribe("orders", { userId: "a" }, vi.fn())
+    const u2 = await hub.subscribe("orders", { "fullDocument.userId": "a" }, vi.fn())
     expect(opened.orders).toHaveLength(1)
     await u1()
     await u2()
@@ -52,8 +52,8 @@ describe("streamHub: fanout + filter evaluation", () => {
     const a = vi.fn()
     const b = vi.fn()
     const c = vi.fn()
-    await hub.subscribe("orders", { userId: "x" }, a)
-    await hub.subscribe("orders", { userId: "y" }, b)
+    await hub.subscribe("orders", { "fullDocument.userId": "x" }, a)
+    await hub.subscribe("orders", { "fullDocument.userId": "y" }, b)
     await hub.subscribe("orders", undefined, c)
     opened.orders[0].emitChange({ _id: "1", userId: "x" })
     expect(a).toHaveBeenCalledTimes(1)
@@ -64,16 +64,41 @@ describe("streamHub: fanout + filter evaluation", () => {
   it("does not notify on a no-match change", async () => {
     const { hub, opened } = setup()
     const cb = vi.fn()
-    await hub.subscribe("orders", { userId: "x" }, cb)
+    await hub.subscribe("orders", { "fullDocument.userId": "x" }, cb)
     opened.orders[0].emitChange({ _id: "1", userId: "y" })
     expect(cb).not.toHaveBeenCalled()
   })
 
-  it("notifies on delete events unconditionally (no fullDocument)", async () => {
+  it("filters delete events when filter only references fullDocument", async () => {
+    // Strict semantics: delete events carry no fullDocument, so a
+    // fullDocument.X-only filter doesn't match. Subscribers that want delete
+    // notifications must OR with operationType:"delete" (the bare-filter
+    // shorthand in attachWs/watchInput does this automatically).
     const { hub, opened } = setup()
     const cb = vi.fn()
-    await hub.subscribe("orders", { userId: "x" }, cb)
+    await hub.subscribe("orders", { "fullDocument.userId": "x" }, cb)
     opened.orders[0].emitChange({ _id: "1" }, "delete")
+    expect(cb).not.toHaveBeenCalled()
+  })
+
+  it("notifies on delete when filter explicitly OR's operationType", async () => {
+    const { hub, opened } = setup()
+    const cb = vi.fn()
+    await hub.subscribe(
+      "orders",
+      { $or: [{ "fullDocument.userId": "x" }, { operationType: "delete" }] },
+      cb
+    )
+    opened.orders[0].emitChange({ _id: "1" }, "delete")
+    expect(cb).toHaveBeenCalledTimes(1)
+  })
+
+  it("matches on top-level operationType", async () => {
+    const { hub, opened } = setup()
+    const cb = vi.fn()
+    await hub.subscribe("orders", { operationType: "insert" }, cb)
+    opened.orders[0].emitChange({ _id: "1", userId: "x" }, "insert")
+    opened.orders[0].emitChange({ _id: "2", userId: "x" }, "update")
     expect(cb).toHaveBeenCalledTimes(1)
   })
 })

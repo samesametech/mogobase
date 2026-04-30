@@ -39,11 +39,29 @@ The second parameter of every handler is `ctx` with these fields:
 | `headers` | queries + mutations | Incoming request headers (from the HTTP POST or the WebSocket upgrade). Use for auth. |
 | `watch(modelName, filterOrPipeline?, options?)` | **queries only** | Opt into live-query semantics. When called, the server keeps a MongoDB change stream open and pushes updates on the open WebSocket to this query subscription. Both `useQuery` and `usePaginatedQuery` trigger a fresh handler run on every passing change-stream event — `usePaginatedQuery` re-runs the handler with the loaded window as the `limit` and pushes a new `PaginatedQueryResult`. |
 
-### `ctx.watch` second arg: filter vs pipeline
+### `ctx.watch` second arg: aggregation pipeline
 
-- **Array** → interpreted as an aggregation pipeline passed through to `collection.watch(pipeline)`. Use this when you need server-side pre-filtering of the change stream (e.g., only events for docs whose `_id` matches). Both `useQuery` and `usePaginatedQuery` trigger a fresh handler run on every passing event.
-- **Plain object** → ignored. Legacy from the window-scoped paginated path; kept in the signature so existing handlers still compile. Use a pipeline instead when you need server-side filtering.
-- **Omitted** → unfiltered watch. The handler re-runs on every change to the collection.
+The second arg is the same shape you'd pass to `collection.watch(pipeline)` — an aggregation pipeline operating on the change event document. Paths use the native change-stream layout (`fullDocument.<field>`, `operationType`, `documentKey._id`, …):
+
+```ts
+ctx.watch("itemMembers", {
+  $match: {
+    $or: [
+      { "fullDocument.documentId": args.id },
+      { "operationType": "delete" },
+    ],
+  },
+})
+```
+
+Accepted shapes:
+
+- **Single `$match` stage object** (above) — fast path. The filter is evaluated in JS by the shared streamHub, so all sockets watching the same model share one MongoDB change stream.
+- **Array of stages** — full aggregation pipeline. If every stage is `$match`, still on the streamHub fast path (stages are AND'd). Any non-`$match` stage (e.g., `$project`, `$addFields`) falls back to a per-socket `collection.watch(pipeline)`.
+- **Bare doc filter** (e.g., `{ userId: "x" }`) — backward-compat shorthand. Auto-translated to `{ $or: [{ "fullDocument.userId": "x" }, { "operationType": "delete" }] }` so deletes still notify the subscriber even though delete events carry no `fullDocument`.
+- **Omitted** — unfiltered watch. The handler re-runs on every change to the collection.
+
+Unsupported filter operators (`$expr`, `$where`, `$elemMatch`, `$text`) throw at subscribe time. Reach for the multi-stage pipeline form when you need them — that path runs your pipeline through MongoDB itself instead of the JS matcher.
 
 ### `ctx.watch` options
 

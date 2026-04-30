@@ -13,6 +13,7 @@ import {
 import { Hono } from "hono"
 import { ServerType } from "@hono/node-server"
 import { ChangeStream, ChangeStreamOptions, Document } from "mongodb"
+import { normalizeWatchInputToPipeline } from "./watchInput"
 
 type PaginatedSub = {
   name: string
@@ -165,7 +166,7 @@ class WebSocket {
         db: DB,
         watch: (modelName: string, pipelineOrFilter?: Document[] | Document) => {
           if (socket?.readyState !== 1) return
-          const pipeline = Array.isArray(pipelineOrFilter) ? (pipelineOrFilter as Document[]) : undefined
+          const pipeline = normalizeWatchInputToPipeline(pipelineOrFilter)
           const cs = DB.model(modelName).watch(pipeline, {
             fullDocument: "updateLookup",
           } as ChangeStreamOptions)
@@ -405,8 +406,7 @@ class WebSocket {
             if (socket?.readyState !== 1) return
             const state = this._state.get(id)
             if (!state) return
-            const isArrayPipeline = Array.isArray(pipelineOrFilter)
-            const pipeline = isArrayPipeline ? (pipelineOrFilter as Document[]) : undefined
+            const pipeline = normalizeWatchInputToPipeline(pipelineOrFilter)
             const changeStream = DB.model(modelName).watch(pipeline, {
               ...(options || {}),
               fullDocument: "updateLookup",

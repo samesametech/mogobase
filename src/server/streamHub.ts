@@ -4,13 +4,17 @@
 //
 // Each model gets ONE unfiltered MongoDB change stream when the first
 // subscriber joins; subscribers register a filter and a callback. When events
-// arrive, each subscriber's filter is evaluated in JS via filterMatcher; only
-// matching subscribers see the event. The stream is closed (and the slot
-// cleared) when the last subscriber leaves.
+// arrive, each subscriber's filter is evaluated in JS via filterMatcher
+// against the FULL change event (not just fullDocument), so filters use the
+// native MongoDB shape — `"fullDocument.userId"`, `"operationType"`,
+// `"documentKey._id"`, etc. — exactly like a `$match` stage you would write
+// in `collection.watch([{ $match: ... }])`. The stream is closed (and the
+// slot cleared) when the last subscriber leaves.
 //
 // Filter limitation: unsupported operators ($expr, $where, $elemMatch, $text)
-// throw at subscribe time. Callers needing those should fall back to the
-// legacy per-socket model.watch(pipeline) path in attachWs.ts.
+// throw at subscribe time. Pipelines containing stages other than $match
+// (e.g. $project, $addFields) can't be evaluated in JS; callers should route
+// those to a per-socket `model.watch(pipeline)` instead.
 
 import { matches, isSupportedFilter } from "@/runtime/filterMatcher"
 import type { MongoFilter } from "@/runtime/filterMatcher"
@@ -64,18 +68,12 @@ export function createStreamHub(opts: StreamHubOptions): StreamHub {
     stream.on("change", (change: any) => {
       const type = (change.operationType || "update") as StreamHubChangeType
       const doc = change.fullDocument ?? null
-      const passesFilter = (sub: Subscriber): boolean => {
-        if (type === "delete" || !doc) return true
-        if (!sub.filter) return true
-        return matches(doc, sub.filter)
-      }
       for (const sub of slot.subs) {
-        if (passesFilter(sub)) {
-          try {
-            sub.cb(doc, type)
-          } catch (err) {
-            console.warn("[mogobase/streamHub] subscriber threw:", err)
-          }
+        if (sub.filter && !matches(change, sub.filter)) continue
+        try {
+          sub.cb(doc, type)
+        } catch (err) {
+          console.warn("[mogobase/streamHub] subscriber threw:", err)
         }
       }
     })

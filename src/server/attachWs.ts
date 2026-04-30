@@ -14,6 +14,7 @@ import {
 import { createStreamHub, type StreamHub } from "./streamHub"
 import { createRefetchScheduler } from "./refetchScheduler"
 import { stableStringify } from "./stableStringify"
+import { normalizeWatchInput, bareFilterToChangeEventMatch } from "./watchInput"
 import type { MongoFilter } from "@/runtime/filterMatcher"
 
 type PaginatedSub = {
@@ -212,16 +213,15 @@ export function attachMogobaseWebSocket(
         db: DB,
         watch: (modelName: string, pipelineOrFilter?: Document[] | Document) => {
           if (ws.readyState !== ws.OPEN) return
-          const isLegacyPipeline = Array.isArray(pipelineOrFilter)
-          if (isLegacyPipeline) {
-            const cs = DB.model(modelName).watch(pipelineOrFilter as Document[], {
+          const normalized = normalizeWatchInput(pipelineOrFilter)
+          if (normalized.kind === "pipeline") {
+            const cs = DB.model(modelName).watch(normalized.pipeline, {
               fullDocument: "updateLookup",
             } as ChangeStreamOptions)
             pendingStreams.push(cs)
             return
           }
-          const filter = (pipelineOrFilter as MongoFilter | undefined) ?? undefined
-          hubSpecsForPaginated.push({ model: modelName, filter })
+          hubSpecsForPaginated.push({ model: modelName, filter: normalized.matchFilter })
         },
       })
 
@@ -387,7 +387,11 @@ export function attachMogobaseWebSocket(
         const decision = await evaluatePolicy("watch", model, headers)
         if (!decision.allow) continue
         try {
-          const unsub = await hub.subscribe(model, decision.filter, () => {
+          // Sync policy returns a bare doc-filter (e.g. {userId: x}); translate
+          // to a change-event $match so the streamHub matcher can evaluate it
+          // against `change.fullDocument.X` and still notify on tombstones.
+          const matchFilter = bareFilterToChangeEventMatch(decision.filter)
+          const unsub = await hub.subscribe(model, matchFilter, () => {
             sendJson(ws, { type: "sync-stream", model })
           })
           unsubFns.push(unsub)
@@ -483,9 +487,9 @@ export function attachMogobaseWebSocket(
               const s = state.get(id)
               if (!s) return
 
-              const isLegacyPipeline = Array.isArray(pipelineOrFilter)
-              if (isLegacyPipeline) {
-                const changeStream = DB.model(modelName).watch(pipelineOrFilter as Document[], {
+              const normalized = normalizeWatchInput(pipelineOrFilter)
+              if (normalized.kind === "pipeline") {
+                const changeStream = DB.model(modelName).watch(normalized.pipeline, {
                   ...(watchOpts || {}),
                   fullDocument: "updateLookup",
                   fullDocumentBeforeChange: "whenAvailable",
@@ -501,9 +505,8 @@ export function attachMogobaseWebSocket(
                 return
               }
 
-              const filter = (pipelineOrFilter as MongoFilter | undefined) ?? undefined
               hub
-                .subscribe(modelName, filter, () => {
+                .subscribe(modelName, normalized.matchFilter, () => {
                   if (ws.readyState !== ws.OPEN) return
                   scheduler.schedule(queryKey, async () => { await run(true) })
                   s.schedulerKeys?.add(queryKey)
