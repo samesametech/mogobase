@@ -1,8 +1,11 @@
 // Server-side auto-stamp wrapper. Injects createdAt/updatedAt/deletedAt on
 // writes so the sync checkpoint has something to filter on without burdening
-// handler authors. Soft-deletes deleteOne/deleteMany via $set rather than
-// physically removing rows. Handlers that genuinely need a hard delete can
-// bypass this by calling `db.collection.deleteOne()` directly.
+// handler authors. For sync-enabled models, deleteOne/deleteMany are rewritten
+// to a $set on deletedAt so the sync engine can propagate tombstones — non-sync
+// models keep MongoDB's native delete semantics. Sync-mode handlers that
+// genuinely need a hard delete can still bypass via `db.collection.deleteOne()`.
+
+import { isSyncEnabled } from "@/runtime/models"
 
 function isUpdateOperatorObject(update: any): boolean {
   if (!update || typeof update !== "object") return false
@@ -26,8 +29,9 @@ function injectUpdatedAt(update: any, now: number): any {
   return { ...update, updatedAt: now }
 }
 
-function wrapCollectionWithAutoStamp(col: any): any {
+function wrapCollectionWithAutoStamp(col: any, name?: string): any {
   if (!col) return col
+  const sync = name ? isSyncEnabled(name) : false
   return new Proxy(col, {
     get(target, prop, receiver) {
       const original = Reflect.get(target, prop, receiver)
@@ -72,6 +76,7 @@ function wrapCollectionWithAutoStamp(col: any): any {
       }
       if (prop === "deleteOne" && typeof original === "function") {
         return (filter: any, ...rest: any[]) => {
+          if (!sync) return original.call(target, filter, ...rest)
           const now = Date.now()
           const updateOne = (target as any).updateOne?.bind(target)
           if (typeof updateOne !== "function") {
@@ -82,6 +87,7 @@ function wrapCollectionWithAutoStamp(col: any): any {
       }
       if (prop === "deleteMany" && typeof original === "function") {
         return (filter: any, ...rest: any[]) => {
+          if (!sync) return original.call(target, filter, ...rest)
           const now = Date.now()
           const updateMany = (target as any).updateMany?.bind(target)
           if (typeof updateMany !== "function") {
@@ -98,6 +104,7 @@ function wrapCollectionWithAutoStamp(col: any): any {
       }
       if (prop === "findOneAndDelete" && typeof original === "function") {
         return (filter: any, ...rest: any[]) => {
+          if (!sync) return original.call(target, filter, ...rest)
           const now = Date.now()
           const findOneAndUpdate = (target as any).findOneAndUpdate?.bind(target)
           if (typeof findOneAndUpdate !== "function") {
@@ -122,7 +129,7 @@ export function wrapDbWithAutoStamp(db: any): any {
   return new Proxy(db, {
     get(target, prop, receiver) {
       if (prop === "model") {
-        return (name: string) => wrapCollectionWithAutoStamp(target.model(name))
+        return (name: string) => wrapCollectionWithAutoStamp(target.model(name), name)
       }
       return Reflect.get(target, prop, receiver)
     },
