@@ -208,6 +208,28 @@ projects pulls to `clientFields ∪ {_id, createdAt, updatedAt, deletedAt}`.
 Either add the field to `clientFields`, or remove the option entirely if no
 restriction is needed.
 
+## Multi-DB: resolver runs but `ctx.db` is the default
+
+The resolver only fires when `ctx.db` entering the handler is the singleton (`DB`). If a caller (a custom HTTP route, a test, or a recursive `ctx.runQuery` / `ctx.runMutation`) passes a different `db` value, the resolver is skipped. Recursive `ctx.runQuery`/`ctx.runMutation` calls also set `_resolved: true` internally so the resolver fires only once per request — that's intentional.
+
+Other causes:
+
+1. The resolver returned `null` / `undefined` for this request (intentional fallback to `MONGO_DB`). Log the resolver input/output to confirm.
+2. The resolver threw — the error is wrapped as `DB resolver threw <err>` and surfaced to the caller. Check server logs.
+3. The route handler isn't passing `headers` into the ctx. The scaffolded `app/api/handlers/route.ts` and `attachMogobaseWebSocket` both pass `headers` automatically; custom transports must too.
+
+## Multi-DB: `ctx.useDatabase requires the server runtime`
+
+The handler is running in the browser (offline / sync mode) and called `ctx.useDatabase` or `ctx.useRawDatabase`. Both APIs are server-only — guard them behind `if (isServer())` from `mogobase/runtime`, or factor the multi-DB read into a separate handler that only runs on the server.
+
+## Multi-DB: `Raw database "X" is not registered`
+
+`ctx.useRawDatabase("X")` was called without a matching `DB.registerDatabase("X", { uri, dbName })` at boot. Make sure the `registerDatabase` call lives in a module that `server.ts` actually imports — a top-level `import "./mogobase/databases"` at the top of `server.ts` is the simplest wiring.
+
+## Multi-DB: writes on `ctx.useDatabase(...)` aren't stamped
+
+Confirm the call is inside a **mutation** handler, not a query. `ctx.useDatabase` in a mutation returns an autoStamp-wrapped view; in a query it's unwrapped (queries don't stamp anything). If you need stamped writes from a query path, refactor into an `internalMutation` and invoke it via `ctx.runMutation("internal.<name>", args)`.
+
 ## Changing hooks doesn't take effect
 
 Hooks are copied into `@/hooks` as templates. Edit them directly in your project — changes in `node_modules/mogobase/src/client/hooks` don't propagate.

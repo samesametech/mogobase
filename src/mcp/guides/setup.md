@@ -169,6 +169,41 @@ See `mogobase://guide/sync` for the full security model (default-deny
 allowlist, `clientFields` projection, server-owned timestamps, push batch
 cap).
 
+## Step 5c (multi-DB only) — Wire resolver + raw aliases
+
+Skip this step unless handlers need to read/write across multiple databases. Both APIs are server-only; offline / sync stay on the default DB.
+
+For per-request multi-tenant routing (each request lands on a different DB on the same cluster), register a resolver at boot. The resolver runs once at the handler entry boundary:
+
+```ts
+// server.ts (or a module imported at boot)
+import DB from "mogobase/db"
+
+DB.setRequestResolver(async ({ headers }) => {
+  const tenantId = headers?.["x-tenant-id"]
+  return tenantId ?? null   // null → fall back to MONGO_DB
+})
+```
+
+Existing handlers don't change — `ctx.db` is automatically bound to the resolved tenant database, including across recursive `ctx.runQuery` / `ctx.runMutation` calls.
+
+For cross-cluster reads (e.g. an analytics MongoDB on a different URI), register named aliases at boot and reach through `ctx.useRawDatabase`:
+
+```ts
+DB.registerDatabase("analytics", {
+  uri: process.env.ANALYTICS_MONGO_URI!,
+  dbName: "analytics",
+})
+```
+
+```ts
+// in a handler
+const analytics = await ctx.useRawDatabase("analytics")
+const events = await analytics.collection("events").find({}).toArray()
+```
+
+Both `setRequestResolver` and `registerDatabase` should be called in a module that `server.ts` imports at boot — typically the file containing your handlers, or a dedicated `mogobase/databases.ts` you import explicitly. See `mogobase://guide/handlers` → "Multi-database access" for the full pattern.
+
 ## Step 6 — Add handlers
 
 Create `./mogobase/todos.ts`:

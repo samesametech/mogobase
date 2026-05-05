@@ -109,6 +109,8 @@ Handler `ctx` provides:
 - `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` — call other handlers, including `internal.*`
 - `ctx.headers` — request headers (useful for auth; online only)
 - `ctx.watch(modelName, pipeline?, options?)` — **queries only**. Subscribes the client to change-stream updates on that collection. Triggers a full handler re-run on every matching event for both `useQuery` and `usePaginatedQuery`. Pass an aggregation pipeline as the second argument for server-side pre-filtering; the third argument forwards to `collection.watch(pipeline, options)` as `ChangeStreamOptions`.
+- `ctx.useDatabase(dbName)` — **server only**. Returns a `MogobaseDB` view bound to a different database **on the same MongoDB cluster**. Carries the same model schemas, indexes, and (in mutations) autoStamp + `dbValidation` semantics as `ctx.db`. Use for multi-tenant apps where each tenant has its own database.
+- `ctx.useRawDatabase(name)` — **server only**. Returns a raw `mongodb.Db` for a connection registered via `DB.registerDatabase(name, …)`. Use for cross-cluster reads (e.g. an analytics MongoDB on a different URI). No autoStamp, no `dbValidation`, no schema awareness — it is the unwrapped driver.
 
 Use `internalQuery()` / `internalMutation()` for handlers that should only be callable from server code (stored under the `internal.` prefix).
 
@@ -300,6 +302,83 @@ The hooks branch on the provider's `online` and `sync` flags: pure-online they u
 yarn dev
 # > Mogobase + Next.js ready on http://localhost:3000
 ```
+
+## Multi-database handlers
+
+Handlers can read and write across multiple databases — same cluster (per-tenant DBs) or different clusters (e.g. an analytics deployment on its own URI). All three patterns are server-only; offline mode and sync stay on the default database.
+
+### Per-tenant database from request headers
+
+Register a resolver once at boot. It runs at the handler entry boundary, picks a database name from the request headers, and `ctx.db` is bound to that DB for the rest of the request — including recursive `ctx.runQuery` / `ctx.runMutation` calls (the resolver does not re-run).
+
+```ts
+// server.ts (or a module imported by it)
+import DB from "mogobase/db"
+
+DB.setRequestResolver(async ({ headers }) => {
+  const tenantId = headers?.["x-tenant-id"]
+  return tenantId ?? null   // null → fall back to MONGO_DB default
+})
+```
+
+```ts
+// mogobase/posts.ts — handler is unchanged; ctx.db points at the tenant's DB
+query("listPosts", {
+  args: v.object({}),
+  handler: async (_a, { db }) => db.model("posts").find({}).toArray(),
+})
+```
+
+The resolver is async and receives `{ headers }`. Return a string to bind a per-tenant view, `null` / `undefined` to keep the default database. Throws are surfaced as `DB resolver threw …`.
+
+### Explicit `ctx.useDatabase` (no resolver)
+
+If you'd rather pick the database inline (e.g. only some handlers are multi-tenant), skip `setRequestResolver` and call `ctx.useDatabase(dbName)`:
+
+```ts
+mutation("createPost", {
+  args: v.object({ tenant: v.string(), title: v.string() }),
+  handler: async ({ tenant, title }, { useDatabase }) => {
+    const tenantDb = useDatabase(tenant)
+    await tenantDb.model("posts").insertOne({ title })
+  },
+})
+```
+
+`ctx.useDatabase` returns a `MogobaseDB` view sharing the singleton's schemas. Indexes are applied lazily the first time a model is touched on that DB. In a mutation handler, the returned view is autoStamp-wrapped automatically, so `insertOne` / `updateOne` / `deleteOne` all stamp timestamps and `dbValidation` runs the same as on `ctx.db`.
+
+### Cross-cluster raw reads (`ctx.useRawDatabase`)
+
+For databases on a different MongoDB cluster (different URI, different credentials), register them at boot and reach through `ctx.useRawDatabase`:
+
+```ts
+// server.ts
+import DB from "mogobase/db"
+
+DB.registerDatabase("analytics", {
+  uri: process.env.ANALYTICS_MONGO_URI!,
+  dbName: "analytics",
+})
+```
+
+```ts
+query("recentEvents", {
+  args: v.object({}),
+  handler: async (_a, { useRawDatabase }) => {
+    const analytics = await useRawDatabase("analytics")
+    return analytics.collection("events").find({}).sort({ ts: -1 }).limit(50).toArray()
+  },
+})
+```
+
+`ctx.useRawDatabase` returns the raw `mongodb.Db` — no autoStamp, no `dbValidation`, no model wrapper. Connections are pooled per URI and lazily opened on first use.
+
+### Caveats
+
+- All three APIs are server-only. The hooks (offline / sync) ignore them — `ctx.db` in client mode is always the local store.
+- Sync is bound to the default database; multi-tenant sync is not supported in this version.
+- Models declared with `defineModel(...)` are visible on every database view (schemas are shared); their indexes are applied per-DB on first access.
+- `ctx.useDatabase` is only for the same cluster (default `MONGO_URI`). For a different cluster, register it with `DB.registerDatabase(...)` and use `ctx.useRawDatabase`.
 
 ## Configuration
 

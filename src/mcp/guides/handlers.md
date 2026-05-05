@@ -40,11 +40,13 @@ The second parameter of every handler is `ctx` with these fields:
 
 | Field | Available in | Purpose |
 |---|---|---|
-| `db` | queries + mutations | The `MogobaseDB` (online) or `MogobaseClientDB` (offline) singleton. Use `db.model(name)` to get a collection-shaped adapter. |
+| `db` | queries + mutations | The `MogobaseDB` (online) or `MogobaseClientDB` (offline) singleton. Use `db.model(name)` to get a collection-shaped adapter. If a request resolver is registered (see "Multi-database access" below), `ctx.db` is a `MogobaseDBView` bound to the resolved tenant DB rather than the default. |
 | `runQuery(name, args)` | queries + mutations | Call another query handler. Internal names must be prefixed: `runQuery("internal.foo", args)`. |
 | `runMutation(name, args)` | queries + mutations | Call another mutation handler. |
 | `headers` | queries + mutations | Incoming request headers (from the HTTP POST or the WebSocket upgrade). Use for auth. |
 | `watch(modelName, filterOrPipeline?, options?)` | **queries only** | Opt into live-query semantics. When called, the server keeps a MongoDB change stream open and pushes updates on the open WebSocket to this query subscription. Both `useQuery` and `usePaginatedQuery` trigger a fresh handler run on every passing change-stream event — `usePaginatedQuery` re-runs the handler with the loaded window as the `limit` and pushes a new `PaginatedQueryResult`. |
+| `useDatabase(dbName)` | **server only** | Returns a `MogobaseDB` view bound to a different database **on the same cluster**. Carries schemas, indexes, and (in mutations) autoStamp + `dbValidation`. See "Multi-database access". |
+| `useRawDatabase(name)` | **server only** | `Promise<Db>`. Returns the raw MongoDB driver `Db` for a connection registered via `DB.registerDatabase(name, …)` — typically a different cluster (analytics, legacy). No autoStamp, no schema awareness. |
 
 ### `ctx.watch` second arg: aggregation pipeline
 
@@ -75,6 +77,91 @@ Unsupported filter operators (`$expr`, `$where`, `$elemMatch`, `$text`) throw at
 The third arg is forwarded to `collection.watch(pipeline, options)` as `ChangeStreamOptions` (e.g., `startAfter`, `resumeAfter`). Pagination options like `paginatedField` / `sortAscending` are **not** needed on `ctx.watch` anymore — they only live in `args.paginationOpts`.
 
 The server sets `fullDocument: "updateLookup"` automatically (and for `useQuery` also `fullDocumentBeforeChange: "whenAvailable"`), so those keys never need to be passed explicitly. The paginated path omits `fullDocumentBeforeChange` because change events are only used to trigger a refetch — the changed document itself isn't read.
+
+## Multi-database access (server only)
+
+Handlers can read and write across multiple databases on the same cluster, and read across clusters. All three patterns are server-only — in offline / sync mode `ctx.db` is the local store and `useDatabase` / `useRawDatabase` are no-ops you should not call.
+
+### Pattern 1 — Per-request resolver (auto-tenant)
+
+Register once at boot. The resolver runs at the handler entry boundary, picks a database name from the headers (e.g. tenant id from a JWT), and `ctx.db` is bound to that DB for the rest of the request — including recursive `ctx.runQuery` / `ctx.runMutation` calls (the resolver does not re-run).
+
+```ts
+// server.ts (or any module imported at boot)
+import DB from "mogobase/db"
+
+DB.setRequestResolver(async ({ headers }) => {
+  const tenantId = headers?.["x-tenant-id"]
+  return tenantId ?? null   // null → fall back to MONGO_DB default
+})
+```
+
+After this is registered, every existing handler reads/writes against the tenant DB without code changes:
+
+```ts
+query("listPosts", {
+  args: v.object({}),
+  handler: async (_a, { db }) => db.model("posts").find({}).toArray(),
+})
+```
+
+Resolver semantics:
+
+- Async; receives `{ headers }` (whatever the WS upgrade or HTTP route handler passed in).
+- Returns a string → bind a `MogobaseDBView` for that DB on the default cluster.
+- Returns `null` / `undefined` → keep the default singleton (`MONGO_DB`).
+- Throws → surfaced to the caller as `DB resolver threw <err>`.
+
+You do **not** need to call `registerDatabase` for resolver-returned names — `useDatabase(name)` is what the resolver actually binds, and it pools the connection on the default `MONGO_URI` automatically.
+
+### Pattern 2 — Explicit `ctx.useDatabase` (no resolver)
+
+If only some handlers are multi-tenant, skip the resolver and pick a DB inline:
+
+```ts
+mutation("createPost", {
+  args: v.object({ tenant: v.string(), title: v.string() }),
+  handler: async ({ tenant, title }, { useDatabase }) => {
+    const tenantDb = useDatabase(tenant)
+    await tenantDb.model("posts").insertOne({ title })
+  },
+})
+```
+
+`ctx.useDatabase(dbName)` returns a `MogobaseDB` view sharing the singleton's schemas. Same cluster only. Indexes are applied lazily the first time a model is touched on that DB. In a mutation handler the returned view is autoStamp-wrapped automatically (timestamps + `dbValidation` apply). Calls within a single request are cached — `useDatabase("x") === useDatabase("x")`.
+
+### Pattern 3 — Cross-cluster raw reads (`ctx.useRawDatabase`)
+
+For databases on a **different** MongoDB cluster (different URI / credentials), register them at boot and reach through `ctx.useRawDatabase`:
+
+```ts
+// server.ts
+import DB from "mogobase/db"
+
+DB.registerDatabase("analytics", {
+  uri: process.env.ANALYTICS_MONGO_URI!,
+  dbName: "analytics",
+})
+```
+
+```ts
+query("recentEvents", {
+  args: v.object({}),
+  handler: async (_a, { useRawDatabase }) => {
+    const analytics = await useRawDatabase("analytics")
+    return analytics.collection("events").find({}).sort({ ts: -1 }).limit(50).toArray()
+  },
+})
+```
+
+`ctx.useRawDatabase(name)` returns the raw `mongodb.Db` — no autoStamp, no `dbValidation`, no model wrapper. Connections are pooled per URI; first access opens the `MongoClient` lazily. Throws `Raw database "<name>" is not registered` if the alias is missing.
+
+### Caveats
+
+- **Server only.** Hooks ignore these in offline / sync mode. Don't call `useDatabase` / `useRawDatabase` from handlers that need to run isomorphically.
+- **Sync stays on the default DB.** Multi-tenant sync is not supported in this version; `defineModel(..., { sync: true })` only opts the model into sync against `MONGO_DB`.
+- **Schemas are global.** `defineModel` registers once on the singleton; every view sees the same model. Per-DB indexes are applied lazily on first model access for that DB.
+- **`useDatabase` is for the same cluster.** For a different `MONGO_URI`, register the connection with `DB.registerDatabase` and use `useRawDatabase`.
 
 ## Queries
 
