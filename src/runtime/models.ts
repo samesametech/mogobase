@@ -23,6 +23,10 @@ export type ModelOptions = {
   // `sync: true` throw. Independent from `clientFields` so models can be
   // online-only with field filtering, or sync-enabled without restrictions.
   sync?: boolean
+  // Opt-in to runtime input validation on writes. When true, the autoStamp
+  // wrapper validates insert/update payloads against the model's zod schema
+  // and rejects on type mismatch. Default false.
+  dbValidation?: boolean
   [k: string]: any
 }
 
@@ -33,6 +37,7 @@ export type ModelDef = {
   indexSpecs?: any
   clientFields?: string[]
   sync?: boolean
+  dbValidation?: boolean
   [k: string]: any
 }
 
@@ -87,6 +92,7 @@ export function defineModel(name: string, schema?: any, options?: ModelOptions |
     schema: withSyncFields(schema),
     clientFields: opts.clientFields,
     sync: opts.sync === true,
+    dbValidation: opts.dbValidation === true,
   }
   state.models.push(def)
   for (const l of state.listeners) {
@@ -121,6 +127,28 @@ export function getClientFields(name: string): string[] | undefined {
 
 export function isSyncEnabled(name: string): boolean {
   return findLatest(name, (m) => (m.sync === true ? true : undefined)) === true
+}
+
+export function isValidationEnabled(name: string): boolean {
+  return findLatest(name, (m) => (m.dbValidation === true ? true : undefined)) === true
+}
+
+// Resolve the latest stored schema for a model into a parsable zod schema.
+// `defineModel` accepts either a ZodObject or a plain `{field: zodType}` shape;
+// we normalize the shape case into `z.object(...)` so callers can `.parse()`
+// or `.partial()` uniformly. Returns undefined if no schema was registered.
+export function getModelZodSchema(name: string): any {
+  const raw = findLatest(name, (m) => m.schema)
+  if (raw == null) return undefined
+  if (isZodType(raw)) return raw
+  if (typeof raw === "object") {
+    try {
+      return z.object(raw as any)
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
 }
 
 function projectToClientFields(doc: any, allowed: Set<string>): any {

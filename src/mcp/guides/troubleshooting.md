@@ -165,6 +165,42 @@ Throwing inside `transform` is the kill switch — the row is treated as a
 conflict, the server's existing version is returned, and storage is not
 touched.
 
+## Mutation throws `[mogobase] Validation failed for <model>.<op>`
+
+The model has `dbValidation: true` and the payload didn't match the zod
+schema. The error message lists each failing path:
+
+```
+[mogobase] Validation failed for posts.insertOne: title: Invalid input: expected string, received number; userId: Invalid input: expected string, received undefined
+```
+
+Common causes:
+
+1. **Args schema is looser than the model schema.** `query/mutation` `args`
+   declared `description: v.string().optional()`, the model schema declared
+   `description: v.string()`. The handler builds the doc from args and
+   inserts it without `description` — model schema rejects it. Fix: tighten
+   the args schema, default the field in the handler, or relax the model
+   schema.
+2. **Internal `insertOne` from a different shape.** A handler does
+   `db.model("posts").insertOne({...args, computedField: 42})` but the
+   model schema doesn't list `computedField` and uses strict mode. Fix:
+   add the field to the schema, or remove `dbValidation: true` if you
+   want the schema to stay informational.
+3. **Update touches a field with the wrong type.** `$set: { qty: "5" }`
+   where the schema says `qty: v.number()`. Coerce before writing.
+
+If you want the schema to remain documentation only and not gate writes,
+remove `dbValidation: true` from `defineModel`. If you want to skip
+validation for a one-off operation, use an aggregation-pipeline update
+(`updateOne(filter, [{$set: {...}}])`) — pipeline updates are intentionally
+skipped by the validator.
+
+Note: `dbValidation` only fires on writes that go through the autoStamp
+wrapper, i.e. handler-driven `db.model(name).<write>` calls inside a
+mutation. Sync-push writes (`pushChanges`) bypass the wrapper and use the
+policy `transform` callback instead — see the sync guide.
+
 ## Sync: client docs missing fields after pull
 
 The model's `clientFields` allowlist is dropping them. The sync engine

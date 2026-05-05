@@ -5,7 +5,7 @@
 // models keep MongoDB's native delete semantics. Sync-mode handlers that
 // genuinely need a hard delete can still bypass via `db.collection.deleteOne()`.
 
-import { isSyncEnabled } from "@/runtime/models"
+import { isSyncEnabled, isValidationEnabled, getModelZodSchema } from "@/runtime/models"
 
 function isUpdateOperatorObject(update: any): boolean {
   if (!update || typeof update !== "object") return false
@@ -13,6 +13,58 @@ function isUpdateOperatorObject(update: any): boolean {
     if (k.startsWith("$")) return true
   }
   return false
+}
+
+function formatZodIssues(error: any): string {
+  const issues = error?.issues || error?.errors
+  if (!Array.isArray(issues)) return String(error?.message ?? error)
+  return issues
+    .map((iss: any) => {
+      const path = Array.isArray(iss.path) && iss.path.length ? iss.path.join(".") : "<root>"
+      return `${path}: ${iss.message}`
+    })
+    .join("; ")
+}
+
+function validationError(model: string, op: string, error: any): Error {
+  return new Error(
+    `[mogobase] Validation failed for ${model}.${op}: ${formatZodIssues(error)}`
+  )
+}
+
+function validateFullDoc(model: string, op: string, doc: any): void {
+  const zod = getModelZodSchema(model)
+  if (!zod) return
+  const result = zod.safeParse(doc)
+  if (!result.success) throw validationError(model, op, result.error)
+}
+
+function validatePartial(model: string, op: string, patch: any): void {
+  const zod = getModelZodSchema(model)
+  if (!zod) return
+  const partial = typeof zod.partial === "function" ? zod.partial() : zod
+  const result = partial.safeParse(patch)
+  if (!result.success) throw validationError(model, op, result.error)
+}
+
+// Validate an update payload against the model schema.
+//   - Aggregation pipeline updates ([{$set: ...}, ...]): skipped — no generic
+//     way to statically check the result shape.
+//   - $-operator updates: validate $set (and $setOnInsert if present) as partials.
+//   - Full-replace update: validate the whole doc.
+function validateUpdate(model: string, op: string, update: any): void {
+  if (Array.isArray(update)) return
+  if (!update || typeof update !== "object") return
+  if (isUpdateOperatorObject(update)) {
+    if (update.$set && typeof update.$set === "object") {
+      validatePartial(model, op, update.$set)
+    }
+    if (update.$setOnInsert && typeof update.$setOnInsert === "object") {
+      validatePartial(model, op, update.$setOnInsert)
+    }
+    return
+  }
+  validateFullDoc(model, op, update)
 }
 
 function injectUpdatedAt(update: any, now: number): any {
@@ -32,6 +84,7 @@ function injectUpdatedAt(update: any, now: number): any {
 function wrapCollectionWithAutoStamp(col: any, name?: string): any {
   if (!col) return col
   const sync = name ? isSyncEnabled(name) : false
+  const validate = name ? isValidationEnabled(name) : false
   return new Proxy(col, {
     get(target, prop, receiver) {
       const original = Reflect.get(target, prop, receiver)
@@ -47,6 +100,7 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
           if (!stamped.updatedAt) stamped.updatedAt = now
           if (!stamped.createdAt) stamped.createdAt = now
           if (stamped.deletedAt === undefined) stamped.deletedAt = null
+          if (validate && name) validateFullDoc(name, "insertOne", stamped)
           return original.call(target, stamped, ...rest)
         }
       }
@@ -65,13 +119,18 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
             if (next.deletedAt === undefined) next.deletedAt = null
             return next
           })
+          if (validate && name) {
+            for (const d of stamped) validateFullDoc(name, "insertMany", d)
+          }
           return original.call(target, stamped, ...rest)
         }
       }
       if ((prop === "updateOne" || prop === "updateMany") && typeof original === "function") {
         return (filter: any, update: any, ...rest: any[]) => {
           const now = Date.now()
-          return original.call(target, filter, injectUpdatedAt(update, now), ...rest)
+          const stampedUpdate = injectUpdatedAt(update, now)
+          if (validate && name) validateUpdate(name, prop as string, stampedUpdate)
+          return original.call(target, filter, stampedUpdate, ...rest)
         }
       }
       if (prop === "deleteOne" && typeof original === "function") {
@@ -99,7 +158,9 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
       if (prop === "findOneAndUpdate" && typeof original === "function") {
         return (filter: any, update: any, ...rest: any[]) => {
           const now = Date.now()
-          return original.call(target, filter, injectUpdatedAt(update, now), ...rest)
+          const stampedUpdate = injectUpdatedAt(update, now)
+          if (validate && name) validateUpdate(name, "findOneAndUpdate", stampedUpdate)
+          return original.call(target, filter, stampedUpdate, ...rest)
         }
       }
       if (prop === "findOneAndDelete" && typeof original === "function") {

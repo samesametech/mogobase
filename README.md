@@ -4,7 +4,7 @@ A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive 
 
 Source: [github.com/samesametech/mogobase](https://github.com/samesametech/mogobase) · npm: [`mogobase`](https://www.npmjs.com/package/mogobase)
 
-- **Typed handlers** — define `query()` / `mutation()` with zod-validated args.
+- **Typed handlers** — define `query()` / `mutation()` with zod-validated args. Opt into a second validation layer at the storage boundary by setting `dbValidation: true` on `defineModel`.
 - **Reactive queries** — `useQuery` and `usePaginatedQuery` both re-run their handlers on MongoDB change stream events. For `usePaginatedQuery` the server reuses the currently-loaded window as the effective limit so scroll position is preserved across refetches, and enrichments from joined collections (watched with additional `ctx.watch` calls) stay fresh.
 - **Offline mode is opt-in** — same handlers run in the browser against RxDB/IndexedDB or WatermelonDB/LokiJS. The consumer imports the backend they want and passes it as `<MogobaseProvider clientDB={…}>`. Online-only apps install neither offline package — `rxdb` and `@nozbe/watermelondb` are both optional peer dependencies. Both backends sync writes across same-origin tabs via BroadcastChannel.
 - **Local-first sync is opt-in** — turn on `sync={true}` and the same hooks read/write through `clientDB` while a background engine continuously replicates with MongoDB over the existing `/ws` connection. Writes pushed up; server changes streamed down; offline writes queue locally and replay when the WS reconnects.
@@ -117,6 +117,7 @@ Use `internalQuery()` / `internalMutation()` for handlers that should only be ca
 - `indexSpecs` — passed to `createIndexes`. The engine always adds `updatedAt`, `deletedAt`, `createdAt` indexes (sync depends on them) on top of yours.
 - `clientFields: string[]` — visibility allowlist. Used by `filterClientFields(model, doc)` (online flow) and the sync engine (pull projection + push allowlist). Engine fields (`_id`, `createdAt`, `updatedAt`, `deletedAt`) are always included. Omit for no restriction.
 - `sync: true` — opt the model into mogobase sync. Default-deny: pull/push/watch on a model without `sync: true` throws.
+- `dbValidation: true` — validate writes against the model's zod schema at the autoStamp layer. When set, `insertOne` / `insertMany` / `updateOne` / `updateMany` / `findOneAndUpdate` are checked before reaching MongoDB; type mismatches and missing required fields throw `[mogobase] Validation failed for <model>.<op>: <path: msg; …>`. `$set` / `$setOnInsert` payloads are validated as partials; aggregation-pipeline updates are skipped. Default `false`.
 
 ### 2. Wrap your app with `MogobaseProvider`
 

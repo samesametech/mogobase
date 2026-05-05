@@ -86,9 +86,10 @@ defineModel(
 )
 ```
 
-## Visibility (`clientFields`) and sync opt-in
+## defineModel options
 
-`defineModel` accepts two security-relevant options:
+`defineModel` accepts a third options argument with security-, visibility-,
+and validation-relevant flags:
 
 ```ts
 defineModel(
@@ -105,18 +106,81 @@ defineModel(
     indexSpecs: [{ key: { userId: 1 } }],
     clientFields: ["title", "content", "userId"],
     sync: true,
+    dbValidation: true,
   }
 )
 ```
 
 | Option | Effect |
 | --- | --- |
+| `indexSpecs` | Passed to MongoDB's `createIndexes`. The engine always adds `updatedAt`, `deletedAt`, `createdAt` indexes on top of yours — sync depends on them. |
 | `clientFields: string[]` | Allowlist of fields shipped to / accepted from clients. Engine fields (`_id`, `createdAt`, `updatedAt`, `deletedAt`) are always included. Used by both `filterClientFields()` (online flow) and the sync engine (pull projection + push allowlist). Omit for no restriction. |
 | `sync: true` | Opt the model into mogobase sync. Default-deny — pull/push/watch on a model without `sync: true` throws. Independent from `clientFields`. |
+| `dbValidation: true` | Validate writes against the model's zod schema at the autoStamp layer. Inserts and full-replace updates are validated as full docs; `$set` / `$setOnInsert` are validated as partials; aggregation-pipeline updates are skipped. Default `false`. See "Database validation" below. |
 
 Use `clientFields` whenever you have server-only fields you don't want
 clients to read or write. Sync-enabled models almost always need it; online-
 only models can use it too — see `filterClientFields` in the handlers guide.
+
+## Database validation (`dbValidation`)
+
+By default the model's zod schema is informational — it documents the shape
+and drives the offline adapters' JSON schemas, but mogobase doesn't reject
+out-of-shape writes at the database boundary. Set `dbValidation: true` to
+turn it into an enforcement boundary:
+
+```ts
+defineModel(
+  "posts",
+  v.object({
+    title: v.string(),
+    content: v.string(),
+    userId: v.string(),
+  }),
+  {
+    dbValidation: true,
+  }
+)
+```
+
+What gets validated, what doesn't:
+
+| Operation | Validated as | Notes |
+| --- | --- | --- |
+| `insertOne` / `insertMany` | Full doc | Run **after** auto-stamping, so engine timestamps are present in the parsed payload. |
+| `updateOne` / `updateMany` with `$set` | Partial | Only the fields being set are checked. |
+| `updateOne` / `updateMany` with `$setOnInsert` | Partial | Same as `$set`. |
+| `findOneAndUpdate` | Same as the underlying update | |
+| Full-replace update (no `$`-operators) | Full doc | |
+| Aggregation pipeline update (`[{$set: ...}, ...]`) | **Skipped** | No generic way to statically check the result shape — handler must validate manually if needed. |
+| `findOne` / `find` | Not applicable | Reads are never validated. |
+| Sync push (`pushChanges`) | **Not gated by this flag** | Sync writes go to the raw collection and rely on the policy `transform` callback for shape enforcement. |
+
+Validation errors throw a single `Error` with a stable prefix:
+
+```
+[mogobase] Validation failed for posts.insertOne: title: Invalid input: expected string, received number; userId: Invalid input: expected string, received undefined
+```
+
+Inside a handler this surfaces as a normal rejected mutation — the WS frame
+returns a `MutationResult` with the error message, and the offline backends
+treat it as a write failure.
+
+When to turn it on:
+
+- You want defense in depth on top of the handler's `args` schema (the args
+  schema only checks the public surface; internal `db.model(name).insertOne`
+  calls bypass it).
+- You want a fast feedback loop on schema drift — adding a required field to
+  the model schema without updating handlers gives you a clear runtime error
+  instead of silently storing rows missing that field.
+
+When to leave it off:
+
+- The model has handlers that assemble docs piecemeal (e.g. multi-step
+  upserts where intermediate states wouldn't pass full-doc validation).
+- You rely on aggregation-pipeline updates that the flag intentionally skips
+  — keep the schema as documentation, not enforcement.
 
 ## ObjectId
 

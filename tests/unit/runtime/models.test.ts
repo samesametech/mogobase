@@ -6,6 +6,8 @@ import {
   getModels,
   getClientFields,
   isSyncEnabled,
+  isValidationEnabled,
+  getModelZodSchema,
   CLIENT_ENGINE_FIELDS,
 } from "@/runtime/models"
 
@@ -102,6 +104,89 @@ describe("getClientFields / isSyncEnabled / getModelOptions", () => {
 
   it("isSyncEnabled false for unknown model", () => {
     expect(isSyncEnabled("nope")).toBe(false)
+  })
+})
+
+describe("isValidationEnabled", () => {
+  beforeEach(() => resetRegistry())
+
+  it("false by default", () => {
+    defineModel("orders")
+    expect(isValidationEnabled("orders")).toBe(false)
+  })
+
+  it("true when dbValidation: true", () => {
+    defineModel("orders", undefined, { dbValidation: true })
+    expect(isValidationEnabled("orders")).toBe(true)
+  })
+
+  it("false for unknown model", () => {
+    expect(isValidationEnabled("nope")).toBe(false)
+  })
+
+  it("independent of sync flag", () => {
+    defineModel("a", undefined, { dbValidation: true })
+    defineModel("b", undefined, { sync: true })
+    expect(isValidationEnabled("a")).toBe(true)
+    expect(isSyncEnabled("a")).toBe(false)
+    expect(isValidationEnabled("b")).toBe(false)
+    expect(isSyncEnabled("b")).toBe(true)
+  })
+
+  it("latest definition wins when a model is registered twice", () => {
+    defineModel("orders", undefined, { dbValidation: false })
+    defineModel("orders", undefined, { dbValidation: true })
+    expect(isValidationEnabled("orders")).toBe(true)
+  })
+})
+
+describe("getModelZodSchema", () => {
+  beforeEach(() => resetRegistry())
+
+  it("returns a ZodObject when the model was defined with one", () => {
+    defineModel("widgets", z4.object({ name: z4.string() }))
+    const zod = getModelZodSchema("widgets")
+    expect(zod).toBeDefined()
+    // Schema must be parsable and include sync fields injected by withSyncFields.
+    const result = zod!.safeParse({
+      name: "x",
+      createdAt: 1,
+      updatedAt: 1,
+      deletedAt: null,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it("wraps a plain shape object into a parsable schema", () => {
+    defineModel("widgets", { name: z4.string() } as any)
+    const zod = getModelZodSchema("widgets")
+    expect(zod).toBeDefined()
+    const ok = zod!.safeParse({
+      name: "x",
+      createdAt: 1,
+      updatedAt: 1,
+      deletedAt: null,
+    })
+    expect(ok.success).toBe(true)
+    const bad = zod!.safeParse({
+      name: 123,
+      createdAt: 1,
+      updatedAt: 1,
+      deletedAt: null,
+    })
+    expect(bad.success).toBe(false)
+  })
+
+  it("returns undefined for unknown models", () => {
+    expect(getModelZodSchema("nope")).toBeUndefined()
+  })
+
+  it("schemaless model still resolves to a parsable schema (sync fields only)", () => {
+    defineModel("audit_log")
+    const zod = getModelZodSchema("audit_log")
+    expect(zod).toBeDefined()
+    const result = zod!.safeParse({ createdAt: 1, updatedAt: 1, deletedAt: null })
+    expect(result.success).toBe(true)
   })
 })
 

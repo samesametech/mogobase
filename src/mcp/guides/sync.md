@@ -260,6 +260,12 @@ Sync correctness rests on `updatedAt`. Mogobase stamps it transparently:
     bypass the wrapper and call `db.collection.deleteOne()` directly via
     the underlying MongoDB client. **Don't do this on a sync-enabled model
     if any client uses a policy filter** — see "Soft-delete invariant" above.
+  - When the model has `dbValidation: true` (see models guide), the same
+    wrapper validates each write against the zod schema after stamping. Note
+    that **sync push (`pushChanges`) writes to the raw collection, not
+    through this wrapper**, so `dbValidation` does **not** gate
+    sync-pushed rows — the policy `transform` callback is what guards
+    sync-push payload shape.
 - **Sync push**: server timestamps override client values. The client's
   `updatedAt` is consulted for conflict detection only.
 - **Client (RxDB and Watermelon adapters)**: same pattern. Writes go through

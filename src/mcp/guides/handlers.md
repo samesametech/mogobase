@@ -27,6 +27,13 @@ query("getUser", {
 
 For queries with no args: `args: v.object({})`.
 
+`args` is the **only** validation that runs by default. Anything the handler
+writes to `db.model(name)` directly (composed docs, computed fields,
+side-effect inserts) is not re-checked against the model schema. To get a
+second layer at the database boundary, set `dbValidation: true` on
+`defineModel` — see the models guide. The two layers compose: `args`
+guards the public surface; `dbValidation` guards the storage boundary.
+
 ## Handler context (`ctx`)
 
 The second parameter of every handler is `ctx` with these fields:
