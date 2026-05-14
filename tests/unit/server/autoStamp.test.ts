@@ -312,3 +312,65 @@ describe("wrapDbWithAutoStamp + dbValidation", () => {
     expect(db.collection.findOne).toHaveBeenCalledWith({ _id: "x" })
   })
 })
+
+describe("wrapDbWithAutoStamp + timeseries", () => {
+  let now: number
+  beforeEach(() => {
+    now = Date.now()
+    vi.spyOn(Date, "now").mockReturnValue(now)
+  })
+
+  it("stamps createdAt + updatedAt but NOT deletedAt on timeseries insertOne", async () => {
+    defineModel("ts_widgets_one", undefined, { timeseries: { timeField: "ts" } })
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("ts_widgets_one").insertOne({ ts: new Date(now), value: 42 })
+    expect(db.collection.insertOne).toHaveBeenCalledTimes(1)
+    const inserted = db.collection.insertOne.mock.calls[0][0]
+    expect(inserted.value).toBe(42)
+    expect(inserted.createdAt).toBe(now)
+    expect(inserted.updatedAt).toBe(now)
+    expect("deletedAt" in inserted).toBe(false)
+  })
+
+  it("stamps each row in timeseries insertMany without deletedAt", async () => {
+    defineModel("ts_widgets_many", undefined, { timeseries: { timeField: "ts" } })
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("ts_widgets_many").insertMany([
+      { ts: new Date(now), value: 1 },
+      { ts: new Date(now + 1000), value: 2 },
+    ])
+    const inserted = db.collection.insertMany.mock.calls[0][0]
+    expect(inserted).toHaveLength(2)
+    for (const row of inserted) {
+      expect(row.createdAt).toBe(now)
+      expect(row.updatedAt).toBe(now)
+      expect("deletedAt" in row).toBe(false)
+    }
+  })
+
+  it("passes deleteOne through to native delete on timeseries even when sync is unset", async () => {
+    defineModel("ts_widgets_del", undefined, { timeseries: { timeField: "ts" } })
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("ts_widgets_del").deleteOne({ sensorId: "s1" })
+    expect(db.collection.deleteOne).toHaveBeenCalledWith({ sensorId: "s1" })
+    expect(db.collection.updateOne).not.toHaveBeenCalled()
+  })
+
+  it("preserves consumer-supplied timestamps on timeseries inserts", async () => {
+    defineModel("ts_widgets_keep", undefined, { timeseries: { timeField: "ts" } })
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("ts_widgets_keep").insertOne({
+      ts: new Date(now - 5000),
+      value: 1,
+      createdAt: 100,
+      updatedAt: 200,
+    })
+    const inserted = db.collection.insertOne.mock.calls[0][0]
+    expect(inserted.createdAt).toBe(100)
+    expect(inserted.updatedAt).toBe(200)
+  })
+})

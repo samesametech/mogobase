@@ -40,6 +40,7 @@ import type { SyncDoc, SyncPushRow } from "@/client/sync-types"
 import {
   getClientFields,
   isSyncEnabled,
+  isTimeseries,
   CLIENT_ENGINE_FIELDS,
 } from "@/runtime/models"
 
@@ -130,6 +131,11 @@ function toSyncDoc(doc: any): SyncDoc {
 }
 
 function requireSyncEnabled(model: string): void {
+  if (isTimeseries(model)) {
+    throw new Error(
+      `Model "${model}" is a time-series collection. Sync is not supported on time-series models — they have restricted update semantics and cannot carry soft-delete tombstones.`
+    )
+  }
   if (!isSyncEnabled(model)) {
     throw new Error(
       `Model "${model}" is not configured for sync. Pass \`sync: true\` to defineModel() options.`
@@ -332,6 +338,10 @@ export function streamChanges(
       for (const spec of specs) {
         if (cancelled) return
         const model = typeof spec === "string" ? spec : spec.model
+        if (isTimeseries(model)) {
+          console.warn(`[mogobase/sync] streamChanges skipped for "${model}": time-series collections are not supported by sync.`)
+          continue
+        }
         // Legacy pipeline specs don't carry a structured filter — fall back to
         // an unfiltered hub subscription (matches all docs for that model).
         // The primary new path in attachWs.ts subscribes via hub.subscribe

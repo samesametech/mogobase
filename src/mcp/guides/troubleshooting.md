@@ -230,6 +230,43 @@ The handler is running in the browser (offline / sync mode) and called `ctx.useD
 
 Confirm the call is inside a **mutation** handler, not a query. `ctx.useDatabase` in a mutation returns an autoStamp-wrapped view; in a query it's unwrapped (queries don't stamp anything). If you need stamped writes from a query path, refactor into an `internalMutation` and invoke it via `ctx.runMutation("internal.<name>", args)`.
 
+## Time-series: `Model "X" is a time-series collection. Sync is not supported`
+
+`defineModel(name, schema, { timeseries: {...} })` was paired with a sync
+operation (`pullChanges`, `pushChanges`, or `streamChanges`). Sync requires
+soft-delete tombstones, which time-series collections can't carry — the two
+are mutually exclusive. Either:
+
+- Use a regular collection for that data and index `(timeField, metaField)` yourself, or
+- Keep the model as a time-series collection and access it only via online queries / mutations.
+
+## Time-series: `defineModel` throws "incompatible with `timeseries`"
+
+You passed both `sync: true` and `timeseries` to `defineModel`. Drop one:
+sync-mode and time-series are mutually exclusive. See "Time-series collections"
+in the models guide for context.
+
+## Time-series: insert fails with `'ts' must be present and contain a valid BSON UTC datetime value`
+
+The `timeField` you declared on the model isn't present (or isn't a JS `Date`)
+in the inserted document. MongoDB requires the field on every insert. Make
+sure you're passing `new Date(...)` for that field, not a number / ISO string.
+
+## Time-series: collection wasn't created with timeseries options
+
+A non-timeseries collection with the same name already exists in MongoDB —
+`createCollection` errors and mogobase falls back to a regular handle, with
+a warning in the server log. Drop or rename the existing collection, then
+restart the server.
+
+## Time-series: `mongo-cursor-pagination` returns empty results
+
+`buildFilters` injects `{deletedAt: null}` into every query. On a time-series
+collection the `deletedAt` field is never written, but `{deletedAt: null}`
+matches documents where the field doesn't exist — so this works. If you've
+*manually* set `deletedAt` on some rows (or pulled them from a regular
+collection), drop and recreate the collection or filter them out explicitly.
+
 ## Changing hooks doesn't take effect
 
 Hooks are copied into `@/hooks` as templates. Edit them directly in your project — changes in `node_modules/mogobase/src/client/hooks` don't propagate.

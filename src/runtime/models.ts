@@ -8,6 +8,27 @@ import { z } from "zod/v4"
 // caching, ordering, and tombstone detection on the client.
 export const CLIENT_ENGINE_FIELDS = ["_id", "createdAt", "updatedAt", "deletedAt"] as const
 
+// MongoDB time-series collection configuration. When set on a model, the
+// collection is created with `createCollection(name, { timeseries: {...} })`
+// at first defineModel() application. See:
+// https://www.mongodb.com/docs/manual/core/timeseries-collections/
+export type TimeseriesOptions = {
+  // Required. The top-level field whose value is the BSON Date for each
+  // measurement. MongoDB rejects inserts where this field is missing or not a
+  // Date.
+  timeField: string
+  // Optional. The top-level field that groups related measurements (e.g.
+  // `{ metaField: "sensorId" }`). MongoDB auto-indexes `{metaField, timeField}`.
+  metaField?: string
+  // Optional bucket granularity. Either supply `granularity`, or the explicit
+  // `bucketMaxSpanSeconds` / `bucketRoundingSeconds` pair (6.3+).
+  granularity?: "seconds" | "minutes" | "hours"
+  bucketMaxSpanSeconds?: number
+  bucketRoundingSeconds?: number
+  // Optional TTL — auto-expire buckets older than N seconds.
+  expireAfterSeconds?: number
+}
+
 export type ModelOptions = {
   indexes?: any
   indexSpecs?: any
@@ -27,6 +48,11 @@ export type ModelOptions = {
   // wrapper validates insert/update payloads against the model's zod schema
   // and rejects on type mismatch. Default false.
   dbValidation?: boolean
+  // Opt-in to a MongoDB time-series collection. Mutually exclusive with `sync`
+  // — sync engine throws on timeseries models (no soft-delete tombstone
+  // semantics). The autoStamp wrapper skips the `deletedAt:null` field stamp
+  // and passes deletes through to native hard-delete.
+  timeseries?: TimeseriesOptions
   [k: string]: any
 }
 
@@ -38,6 +64,7 @@ export type ModelDef = {
   clientFields?: string[]
   sync?: boolean
   dbValidation?: boolean
+  timeseries?: TimeseriesOptions
   [k: string]: any
 }
 
@@ -86,6 +113,12 @@ function withSyncFields(schema: any): any {
 
 export function defineModel(name: string, schema?: any, options?: ModelOptions | any): void {
   const opts: ModelOptions = (options && typeof options === "object" && !Array.isArray(options)) ? options : { indexes: options }
+  if (opts.timeseries && opts.sync === true) {
+    throw new Error(
+      `[mogobase] defineModel("${name}"): \`sync: true\` is incompatible with \`timeseries\`. ` +
+        `Time-series collections have restricted update/delete semantics and cannot participate in soft-delete-based sync.`
+    )
+  }
   const def: ModelDef = {
     ...opts,
     name,
@@ -93,6 +126,7 @@ export function defineModel(name: string, schema?: any, options?: ModelOptions |
     clientFields: opts.clientFields,
     sync: opts.sync === true,
     dbValidation: opts.dbValidation === true,
+    timeseries: opts.timeseries,
   }
   state.models.push(def)
   for (const l of state.listeners) {
@@ -131,6 +165,14 @@ export function isSyncEnabled(name: string): boolean {
 
 export function isValidationEnabled(name: string): boolean {
   return findLatest(name, (m) => (m.dbValidation === true ? true : undefined)) === true
+}
+
+export function getTimeseriesOptions(name: string): TimeseriesOptions | undefined {
+  return findLatest(name, (m) => m.timeseries)
+}
+
+export function isTimeseries(name: string): boolean {
+  return !!getTimeseriesOptions(name)
 }
 
 // Resolve the latest stored schema for a model into a parsable zod schema.

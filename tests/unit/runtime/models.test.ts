@@ -8,6 +8,8 @@ import {
   isSyncEnabled,
   isValidationEnabled,
   getModelZodSchema,
+  getTimeseriesOptions,
+  isTimeseries,
   CLIENT_ENGINE_FIELDS,
 } from "@/runtime/models"
 
@@ -187,6 +189,48 @@ describe("getModelZodSchema", () => {
     expect(zod).toBeDefined()
     const result = zod!.safeParse({ createdAt: 1, updatedAt: 1, deletedAt: null })
     expect(result.success).toBe(true)
+  })
+})
+
+describe("timeseries", () => {
+  beforeEach(() => resetRegistry())
+
+  it("isTimeseries false by default", () => {
+    defineModel("readings")
+    expect(isTimeseries("readings")).toBe(false)
+    expect(getTimeseriesOptions("readings")).toBeUndefined()
+  })
+
+  it("isTimeseries true when timeseries is set, returns full opts", () => {
+    defineModel("readings", undefined, {
+      timeseries: { timeField: "ts", metaField: "sensorId", granularity: "seconds" },
+    })
+    expect(isTimeseries("readings")).toBe(true)
+    expect(getTimeseriesOptions("readings")).toEqual({
+      timeField: "ts",
+      metaField: "sensorId",
+      granularity: "seconds",
+    })
+  })
+
+  it("throws if a model is both sync and timeseries", () => {
+    expect(() =>
+      defineModel("bad", undefined, {
+        sync: true,
+        timeseries: { timeField: "ts" },
+      })
+    ).toThrow(/incompatible with `timeseries`/)
+  })
+
+  it("timeseries is independent of clientFields and dbValidation", () => {
+    defineModel("readings", undefined, {
+      timeseries: { timeField: "ts" },
+      clientFields: ["value", "sensorId"],
+      dbValidation: true,
+    })
+    expect(isTimeseries("readings")).toBe(true)
+    expect(isValidationEnabled("readings")).toBe(true)
+    expect(getClientFields("readings")).toEqual(["value", "sensorId"])
   })
 })
 

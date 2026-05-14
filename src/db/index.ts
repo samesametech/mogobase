@@ -1,7 +1,7 @@
 import { Collection, CreateIndexesOptions, Db, IndexDescription, MongoClient, ObjectId } from "mongodb"
 import DataLoader from "dataloader"
 import buildMongoFilters from "./buildMongoFilters"
-import { onModel } from "@/runtime/models"
+import { onModel, TimeseriesOptions } from "@/runtime/models"
 
 const DB_GLOBAL_KEY = "__mogobase_db__"
 const dbGlobal = globalThis as unknown as Record<string, { instance?: MogobaseDB }>
@@ -71,7 +71,7 @@ class MogobaseDB {
     if (!this._modelsBound) {
       this._modelsBound = true
       onModel((m) => {
-        this.defineModel(m.name, m.schema, m.indexes).catch((err) =>
+        this.defineModel(m.name, m.schema, m.indexes, m.timeseries).catch((err) =>
           console.error(`[mogobase] failed to apply model ${m.name}`, err)
         )
       })
@@ -119,17 +119,20 @@ class MogobaseDB {
     indexes?: {
       indexSpecs: IndexDescription[]
       options?: CreateIndexesOptions
-    }
+    },
+    timeseries?: TimeseriesOptions
   ): Promise<Collection> {
     if (!this._db) {
       this._db = await this.connect()
     }
-    if (schema) {
-      this._schemas.set(name, { schema, indexes })
-    } else if (indexes) {
-      this._schemas.set(name, { indexes })
+    const entry: any = {}
+    if (schema) entry.schema = schema
+    if (indexes) entry.indexes = indexes
+    if (timeseries) entry.timeseries = timeseries
+    if (schema || indexes || timeseries) {
+      this._schemas.set(name, entry)
     }
-    const collection = await this._applyModelToDb(this._db, name, { schema, indexes })
+    const collection = await this._applyModelToDb(this._db, name, entry)
     const key = viewKey(this._defaultUri ?? DEFAULT_URI_FALLBACK, this._defaultDbName ?? DEFAULT_DB_FALLBACK)
     let applied = this._appliedModels.get(key)
     if (!applied) {
@@ -140,25 +143,55 @@ class MogobaseDB {
     return collection
   }
 
-  getSchema(name: string): { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions } } | undefined {
+  getSchema(name: string): { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions }; timeseries?: TimeseriesOptions } | undefined {
     return this._schemas.get(name)
   }
 
-  getSchemas(): Map<string, { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions } }> {
+  getSchemas(): Map<string, { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions }; timeseries?: TimeseriesOptions }> {
     return this._schemas
   }
 
   // Apply a model's indexes (custom + sync-checkpoint) to a specific Db handle.
   // Mongo no-ops on duplicate index creates so this is safe to call repeatedly
   // across views.
+  //
+  // For timeseries models we additionally probe for the collection's existence
+  // via listCollections (since `db.collection()` returns a handle whether or
+  // not the collection has been materialized) and call createCollection with
+  // the timeseries spec on first encounter. Sync-checkpoint auto-indexes are
+  // skipped for timeseries — soft-delete semantics don't apply and the indexes
+  // are not needed since sync is rejected for timeseries models.
   async _applyModelToDb(
     dbHandle: Db,
     name: string,
-    entry: { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions } }
+    entry: { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions }; timeseries?: TimeseriesOptions }
   ): Promise<Collection> {
-    let collection = dbHandle.collection(name)
-    if (!collection) {
-      collection = await dbHandle.createCollection(name)
+    let collection: Collection
+    const ts = entry?.timeseries
+    if (ts) {
+      const existing = await dbHandle.listCollections({ name }, { nameOnly: true }).toArray()
+      if (existing.length === 0) {
+        const tsSpec: any = { timeField: ts.timeField }
+        if (ts.metaField) tsSpec.metaField = ts.metaField
+        if (ts.granularity) tsSpec.granularity = ts.granularity
+        if (ts.bucketMaxSpanSeconds !== undefined) tsSpec.bucketMaxSpanSeconds = ts.bucketMaxSpanSeconds
+        if (ts.bucketRoundingSeconds !== undefined) tsSpec.bucketRoundingSeconds = ts.bucketRoundingSeconds
+        const createOpts: any = { timeseries: tsSpec }
+        if (ts.expireAfterSeconds !== undefined) createOpts.expireAfterSeconds = ts.expireAfterSeconds
+        try {
+          collection = await dbHandle.createCollection(name, createOpts)
+        } catch (err: any) {
+          // If a non-timeseries collection of the same name already exists
+          // listCollections might race; fall through to a regular handle and
+          // let the warning below surface the mismatch.
+          console.warn(`[mogobase] failed to create timeseries collection ${name}:`, err)
+          collection = dbHandle.collection(name)
+        }
+      } else {
+        collection = dbHandle.collection(name)
+      }
+    } else {
+      collection = dbHandle.collection(name)
     }
     if (entry?.indexes) {
       try {
@@ -167,14 +200,16 @@ class MogobaseDB {
         console.warn(`[mogobase] failed to apply custom indexes for ${name}:`, err)
       }
     }
-    try {
-      await collection.createIndexes([
-        { key: { updatedAt: 1 }, name: "mogobase_updatedAt_1" },
-        { key: { deletedAt: 1 }, name: "mogobase_deletedAt_1" },
-        { key: { createdAt: 1 }, name: "mogobase_createdAt_1" },
-      ])
-    } catch (err) {
-      console.warn(`[mogobase] failed to apply sync indexes for ${name}:`, err)
+    if (!ts) {
+      try {
+        await collection.createIndexes([
+          { key: { updatedAt: 1 }, name: "mogobase_updatedAt_1" },
+          { key: { deletedAt: 1 }, name: "mogobase_deletedAt_1" },
+          { key: { createdAt: 1 }, name: "mogobase_createdAt_1" },
+        ])
+      } catch (err) {
+        console.warn(`[mogobase] failed to apply sync indexes for ${name}:`, err)
+      }
     }
     return collection
   }
@@ -327,14 +362,17 @@ class MogobaseDBView {
     indexes?: {
       indexSpecs: IndexDescription[]
       options?: CreateIndexesOptions
-    }
+    },
+    timeseries?: TimeseriesOptions
   ): Promise<Collection> {
-    if (schema) {
-      this._schemas.set(name, { schema, indexes })
-    } else if (indexes) {
-      this._schemas.set(name, { indexes })
+    const entry: any = {}
+    if (schema) entry.schema = schema
+    if (indexes) entry.indexes = indexes
+    if (timeseries) entry.timeseries = timeseries
+    if (schema || indexes || timeseries) {
+      this._schemas.set(name, entry)
     }
-    const collection = await this._parent._applyModelToDb(this._db, name, { schema, indexes })
+    const collection = await this._parent._applyModelToDb(this._db, name, entry)
     const key = viewKey(this._uri, this._dbName)
     let applied = this._parent._appliedModels.get(key)
     if (!applied) {

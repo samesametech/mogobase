@@ -5,7 +5,7 @@
 // models keep MongoDB's native delete semantics. Sync-mode handlers that
 // genuinely need a hard delete can still bypass via `db.collection.deleteOne()`.
 
-import { isSyncEnabled, isValidationEnabled, getModelZodSchema } from "@/runtime/models"
+import { isSyncEnabled, isValidationEnabled, getModelZodSchema, isTimeseries } from "@/runtime/models"
 
 function isUpdateOperatorObject(update: any): boolean {
   if (!update || typeof update !== "object") return false
@@ -85,21 +85,23 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
   if (!col) return col
   const sync = name ? isSyncEnabled(name) : false
   const validate = name ? isValidationEnabled(name) : false
+  // Timeseries collections cannot soft-delete (we never propagate tombstones
+  // for them) and their `deletedAt` field would just bloat each measurement.
+  // Inserts skip the `deletedAt:null` stamp and deletes pass through to
+  // MongoDB's native timeseries delete path.
+  const timeseries = name ? isTimeseries(name) : false
   return new Proxy(col, {
     get(target, prop, receiver) {
       const original = Reflect.get(target, prop, receiver)
       if (prop === "insertOne" && typeof original === "function") {
         return (doc: any, ...rest: any[]) => {
           const now = Date.now()
-          const stamped = {
-            createdAt: now,
-            updatedAt: now,
-            deletedAt: null,
-            ...(doc || {}),
-          }
+          const stamped: any = timeseries
+            ? { createdAt: now, updatedAt: now, ...(doc || {}) }
+            : { createdAt: now, updatedAt: now, deletedAt: null, ...(doc || {}) }
           if (!stamped.updatedAt) stamped.updatedAt = now
           if (!stamped.createdAt) stamped.createdAt = now
-          if (stamped.deletedAt === undefined) stamped.deletedAt = null
+          if (!timeseries && stamped.deletedAt === undefined) stamped.deletedAt = null
           if (validate && name) validateFullDoc(name, "insertOne", stamped)
           return original.call(target, stamped, ...rest)
         }
@@ -108,15 +110,12 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
         return (docs: any[], ...rest: any[]) => {
           const now = Date.now()
           const stamped = (docs || []).map((doc: any) => {
-            const next = {
-              createdAt: now,
-              updatedAt: now,
-              deletedAt: null,
-              ...(doc || {}),
-            }
+            const next: any = timeseries
+              ? { createdAt: now, updatedAt: now, ...(doc || {}) }
+              : { createdAt: now, updatedAt: now, deletedAt: null, ...(doc || {}) }
             if (!next.updatedAt) next.updatedAt = now
             if (!next.createdAt) next.createdAt = now
-            if (next.deletedAt === undefined) next.deletedAt = null
+            if (!timeseries && next.deletedAt === undefined) next.deletedAt = null
             return next
           })
           if (validate && name) {
@@ -135,7 +134,7 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
       }
       if (prop === "deleteOne" && typeof original === "function") {
         return (filter: any, ...rest: any[]) => {
-          if (!sync) return original.call(target, filter, ...rest)
+          if (!sync || timeseries) return original.call(target, filter, ...rest)
           const now = Date.now()
           const updateOne = (target as any).updateOne?.bind(target)
           if (typeof updateOne !== "function") {
@@ -146,7 +145,7 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
       }
       if (prop === "deleteMany" && typeof original === "function") {
         return (filter: any, ...rest: any[]) => {
-          if (!sync) return original.call(target, filter, ...rest)
+          if (!sync || timeseries) return original.call(target, filter, ...rest)
           const now = Date.now()
           const updateMany = (target as any).updateMany?.bind(target)
           if (typeof updateMany !== "function") {
@@ -165,7 +164,7 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
       }
       if (prop === "findOneAndDelete" && typeof original === "function") {
         return (filter: any, ...rest: any[]) => {
-          if (!sync) return original.call(target, filter, ...rest)
+          if (!sync || timeseries) return original.call(target, filter, ...rest)
           const now = Date.now()
           const findOneAndUpdate = (target as any).findOneAndUpdate?.bind(target)
           if (typeof findOneAndUpdate !== "function") {

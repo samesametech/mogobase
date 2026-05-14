@@ -117,6 +117,7 @@ defineModel(
 | `clientFields: string[]` | Allowlist of fields shipped to / accepted from clients. Engine fields (`_id`, `createdAt`, `updatedAt`, `deletedAt`) are always included. Used by both `filterClientFields()` (online flow) and the sync engine (pull projection + push allowlist). Omit for no restriction. |
 | `sync: true` | Opt the model into mogobase sync. Default-deny — pull/push/watch on a model without `sync: true` throws. Independent from `clientFields`. |
 | `dbValidation: true` | Validate writes against the model's zod schema at the autoStamp layer. Inserts and full-replace updates are validated as full docs; `$set` / `$setOnInsert` are validated as partials; aggregation-pipeline updates are skipped. Default `false`. See "Database validation" below. |
+| `timeseries: { timeField, metaField?, granularity?, … }` | Create the underlying MongoDB collection as a [time-series collection](https://www.mongodb.com/docs/manual/core/timeseries-collections/). The model's behavior changes — see "Time-series collections" below. Mutually exclusive with `sync: true`. |
 
 Use `clientFields` whenever you have server-only fields you don't want
 clients to read or write. Sync-enabled models almost always need it; online-
@@ -181,6 +182,109 @@ When to leave it off:
   upserts where intermediate states wouldn't pass full-doc validation).
 - You rely on aggregation-pipeline updates that the flag intentionally skips
   — keep the schema as documentation, not enforcement.
+
+## Time-series collections
+
+Set `timeseries` on the options to create the underlying MongoDB collection as
+a [time-series collection](https://www.mongodb.com/docs/manual/core/timeseries-collections/)
+— good for sensor readings, event metrics, financial ticks, anything that's
+write-mostly and bucketable by time:
+
+```ts
+defineModel(
+  "sensor_readings",
+  v.object({
+    sensorId: v.string(),
+    value: v.number(),
+    ts: v.date(),         // your timeField
+  }),
+  {
+    timeseries: {
+      timeField: "ts",
+      metaField: "sensorId",
+      granularity: "seconds",
+      // expireAfterSeconds: 60 * 60 * 24 * 30, // optional TTL
+    },
+  }
+)
+
+mutation("recordReading", {
+  args: v.object({ sensorId: v.string(), value: v.number(), ts: v.number() }),
+  handler: async (args, { db }) => {
+    return db.model("sensor_readings").insertOne({
+      sensorId: args.sensorId,
+      value: args.value,
+      ts: new Date(args.ts),
+    })
+  },
+})
+
+query("listReadings", {
+  args: v.object({ sensorId: v.string(), paginationOpts: v.any().optional() }),
+  handler: async (args, { db }) => {
+    return await MongoPaging.find(db.model("sensor_readings"), {
+      query: buildFilters({ sensorId: args.sensorId }),
+      limit: 50,
+      ...(args.paginationOpts || {}),
+    })
+  },
+})
+```
+
+### `timeseries` options
+
+| Field | Required | Effect |
+| --- | --- | --- |
+| `timeField` | yes | Top-level field whose value is a BSON `Date` on each measurement. Inserts without it are rejected by MongoDB. |
+| `metaField` | no | Top-level field used to group measurements (e.g. a sensor ID). MongoDB auto-indexes `{metaField, timeField}`. |
+| `granularity` | no | `"seconds"` / `"minutes"` / `"hours"`. Tells MongoDB how to bucket measurements internally. Mutually exclusive with the explicit `bucketMaxSpanSeconds` / `bucketRoundingSeconds` pair (6.3+). |
+| `bucketMaxSpanSeconds`, `bucketRoundingSeconds` | no | Explicit bucket-span control (MongoDB 6.3+). |
+| `expireAfterSeconds` | no | TTL — buckets older than this are auto-deleted. |
+
+mogobase calls `db.createCollection(name, { timeseries: { … } })` the first
+time `defineModel` is applied for that `(uri, dbName, modelName)` tuple. If a
+non-timeseries collection of the same name already exists, MongoDB's create
+errors and you'll see a warning in the server log — drop or rename the
+existing collection before turning on `timeseries`.
+
+### Behavior differences from regular collections
+
+| Aspect | Regular collection | Time-series collection |
+| --- | --- | --- |
+| `insertOne` / `insertMany` auto-stamping | Adds `createdAt`, `updatedAt`, `deletedAt: null` | Adds `createdAt`, `updatedAt` — **no `deletedAt`** (soft-delete doesn't apply) |
+| `deleteOne` / `deleteMany` in sync-enabled handlers | Rewritten to a `$set: { deletedAt }` soft-delete | **Pass through to MongoDB's native delete** — sync is forbidden for timeseries anyway |
+| Auto sync-checkpoint indexes (`updatedAt`, `deletedAt`, `createdAt`) | Always applied | **Skipped** — sync isn't supported, the metaField+timeField auto-index covers the common access pattern |
+| Sync (`sync: true`) | Allowed | **Forbidden** — `defineModel` throws at registration; `pullChanges`/`pushChanges`/`streamChanges` reject at runtime |
+| Update semantics | Arbitrary | Restricted by MongoDB — can't update `timeField`, `metaField`-as-key, etc. In MongoDB 6.0 only inserts + deletes + non-meta-field updates are reliable; 7.0+ lifts most restrictions. |
+| `_id` | Auto-generated `ObjectId` | Same — `mongo-cursor-pagination` paginates by `_id` correctly |
+
+### Pagination and filters
+
+Both work the same as on regular collections:
+
+```ts
+import MongoPaging from "mongo-cursor-pagination"
+import { buildFilters } from "mogobase/db"
+
+const result = await MongoPaging.find(db.model("sensor_readings"), {
+  query: buildFilters({ sensorId: "alpha", value_gte: 100 }),
+  limit: 50,
+  paginatedField: "_id",        // or "ts"
+  sortAscending: false,
+})
+```
+
+`buildFilters` always injects `{ deletedAt: null }` into its output. On a
+time-series collection that has no `deletedAt` field this still matches
+correctly — MongoDB's `{deletedAt: null}` predicate matches documents that
+don't have the field at all.
+
+### When NOT to use `timeseries`
+
+- You need mogobase sync — soft-delete tombstones can't propagate.
+- You need arbitrary updates on individual measurements pre-MongoDB 7.0.
+- You need `_id`-by-string with deterministic client IDs (sync-style). Use a
+  regular collection and an index on `(timeField, metaField)`.
 
 ## ObjectId
 
