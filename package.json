@@ -1,7 +1,7 @@
 {
   "name": "mogobase",
   "type": "module",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "description": "Lightweight Next.js + MongoDB backend with typed handlers, WebSocket live queries, and opt-in offline / local-first sync.",
   "main": "lib/index.js",
   "types": "types/index.d.ts",
@@ -93,7 +93,7 @@
     "test:unit": "vitest run -c vitest.unit.config.ts",
     "test:integration": "vitest run -c vitest.integration.config.ts",
     "test:watch": "vitest -c vitest.unit.config.ts",
-    "prepublish": "npm run build"
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.7",
