@@ -1,11 +1,20 @@
-import { Collection, CreateIndexesOptions, Db, IndexDescription, MongoClient, ObjectId } from "mongodb"
+import { Collection, CreateIndexesOptions, Db, Decimal128, IndexDescription, MongoClient, ObjectId } from "mongodb"
 import DataLoader from "dataloader"
 import buildMongoFilters from "./buildMongoFilters"
 import { onModel, TimeseriesOptions } from "@/runtime/models"
 
 const DB_GLOBAL_KEY = "__mogobase_db__"
-const dbGlobal = globalThis as unknown as Record<string, { instance?: MogobaseDB }>
+const dbGlobal = globalThis as unknown as Record<
+  string,
+  { instance?: MogobaseDB; makeDecimal?: (s: string) => unknown }
+>
 if (!dbGlobal[DB_GLOBAL_KEY]) dbGlobal[DB_GLOBAL_KEY] = {}
+// Publish the real BSON Decimal128 factory through the same server-only
+// globalThis channel as the DB singleton. The browser-safe autoStamp wrapper
+// reads this instead of `import { Decimal128 } from "mongodb"` — a static
+// import there would drag mongodb's client-side-encryption (require
+// "child_process") into the client bundle via handlers.ts → mogobase/runtime.
+dbGlobal[DB_GLOBAL_KEY].makeDecimal = (s: string) => Decimal128.fromString(s)
 
 type ResolverReturn = string | null | undefined
 type RequestResolver = (ctx: { headers?: any }) => ResolverReturn | Promise<ResolverReturn>

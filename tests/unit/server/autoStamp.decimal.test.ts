@@ -1,11 +1,22 @@
 // tests/unit/server/autoStamp.decimal.test.ts
 // Decimal128 codec wired through the autoStamp db wrapper: schema-guided
 // string→Decimal128 on writes, schema-agnostic Decimal128→string on reads.
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, beforeAll } from "vitest"
 import { Decimal128 } from "mongodb"
 import { wrapDbWithAutoStamp } from "@/server/autoStamp"
 import { defineModel } from "@/runtime/models"
 import { v } from "@/server/handlers"
+
+// autoStamp no longer statically imports mongodb (that would pull
+// client-side-encryption into the client bundle via handlers.ts). The real
+// Decimal128 factory is injected through the server-only globalThis channel
+// that `mogobase/db` publishes on load. This test doesn't import mogobase/db,
+// so seed the same channel here exactly as the db module does.
+beforeAll(() => {
+  const g = globalThis as unknown as Record<string, { makeDecimal?: (s: string) => unknown }>
+  if (!g.__mogobase_db__) g.__mogobase_db__ = {}
+  g.__mogobase_db__.makeDecimal = (s: string) => Decimal128.fromString(s)
+})
 
 function isDec(x: any): boolean {
   return !!x && typeof x === "object" && x._bsontype === "Decimal128"

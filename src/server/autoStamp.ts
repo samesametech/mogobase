@@ -5,7 +5,6 @@
 // models keep MongoDB's native delete semantics. Sync-mode handlers that
 // genuinely need a hard delete can still bypass via `db.collection.deleteOne()`.
 
-import { Decimal128 } from "mongodb"
 import { isSyncEnabled, isValidationEnabled, getModelZodSchema, isTimeseries } from "@/runtime/models"
 import {
   schemaHasDecimal128,
@@ -14,7 +13,19 @@ import {
   decodeDecimal128Deep,
 } from "@/runtime/decimal"
 
-const makeDecimal = (s: string) => Decimal128.fromString(s)
+// Do NOT `import … from "mongodb"` here. This module is statically imported by
+// the browser-safe handlers.ts (re-exported via mogobase/runtime, consumed by
+// client hooks); a static mongodb import pulls client-side-encryption →
+// require("child_process") into the client bundle. The real Decimal128 factory
+// is injected through the server-only globalThis channel published by
+// `mogobase/db`. On the client (offline path) the value stays a plain string,
+// which is the documented client-side representation of a decimal128 field.
+const DB_GLOBAL_KEY = "__mogobase_db__"
+const makeDecimal = (s: string): any => {
+  const g = globalThis as unknown as Record<string, { makeDecimal?: (s: string) => any }>
+  const fn = g[DB_GLOBAL_KEY]?.makeDecimal
+  return fn ? fn(s) : s
+}
 
 // Schema-guided write encode for a full doc (insert / full-replace).
 function encodeDoc(zod: any, doc: any): any {
