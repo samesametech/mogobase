@@ -3,6 +3,7 @@ import z4 from "zod/v4"
 import type { MogobaseDB } from "@/db"
 import type { ChangeStreamOptions, Db, Document } from "mongodb"
 import { wrapDbWithAutoStamp } from "@/server/autoStamp"
+import { decimal128 } from "@/runtime/decimal"
 
 // Read the MogobaseDB singleton via globalThis instead of importing it.
 // A static `import` here would pull mongodb into the client bundle (this
@@ -199,7 +200,16 @@ export function internalMutation(name: string, c: MutationHandler) {
   Handlers._instance._mutations.set(`internal.${name}`, c)
 }
 
-export const v = z4
+// `v` is zod/v4 plus mogobase's first-class `decimal128()` builder. A
+// `v.decimal128()` field validates a canonical decimal string and is
+// persisted as a BSON Decimal128 by the autoStamp codec (string→Decimal128
+// on write, Decimal128→string on read) — see src/runtime/decimal.ts.
+// zod/v4's default export is non-extensible, so we can't attach to it
+// in place — spread it into a fresh object and add `decimal128`.
+export const v: typeof z4 & { decimal128: typeof decimal128 } = {
+  ...z4,
+  decimal128,
+}
 
 const _singleton = new Handlers()
 

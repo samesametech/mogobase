@@ -67,6 +67,40 @@ defineModel("posts", v.object({
 
 Omit `_id` — MongoDB assigns `ObjectId` by default. If you want a string-keyed model, pass `_id: v.string()` and generate IDs yourself.
 
+## Money / exact decimals — `v.decimal128()`
+
+Never store money as a float. Use `v.decimal128()` for any monetary amount, rate,
+or fee:
+
+```ts
+defineModel("invoices", v.object({
+  _id: v.string(),
+  currency: v.string(),
+  amount: v.decimal128(),                 // "100.14"
+  taxRate: v.decimal128().nullable(),     // "0.0825" | null
+  lineItems: v.array(v.object({ unitPrice: v.decimal128() })),
+}))
+```
+
+A `decimal128` field is a **canonical decimal string on the wire and in handler
+code** (`"100.14"`), and a **BSON `Decimal128` in MongoDB**. The conversion is
+automatic and lives in the autoStamp write seam (`_runMutation` path):
+
+- **Writes** — strings on `insertOne`/`insertMany`/full-replace updates and on
+  `$set`/`$setOnInsert` (including dotted-path keys like `"fee.rate"`) are
+  encoded string → `Decimal128`. Nested objects and arrays are walked by the
+  schema.
+- **Reads** — every `Decimal128` in a `findOne`/`findOneAndUpdate` result or a
+  `find()`/`aggregate()` cursor is decoded back to a string, so handlers and
+  clients always see `"100.14"`, never a BSON object.
+
+Storing the real numeric BSON type (not a string) is what makes server-side
+numeric comparison/aggregation correct: `amount_gt`, `$gte`, `$sum`, `$avg`,
+and cross-numeric-type matches all work, with none of the lexicographic
+string-ordering surprises you get from stringified amounts. Validation accepts
+`-?\d+(\.\d+)?`; pass a number and it is coerced via `String(n)` on write.
+Models with no `decimal128` field pay zero codec overhead.
+
 ## Indexes
 
 Indexes pass through to MongoDB's `createIndexes`:

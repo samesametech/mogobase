@@ -5,7 +5,84 @@
 // models keep MongoDB's native delete semantics. Sync-mode handlers that
 // genuinely need a hard delete can still bypass via `db.collection.deleteOne()`.
 
+import { Decimal128 } from "mongodb"
 import { isSyncEnabled, isValidationEnabled, getModelZodSchema, isTimeseries } from "@/runtime/models"
+import {
+  schemaHasDecimal128,
+  encodeDecimal128,
+  encodeDecimal128Patch,
+  decodeDecimal128Deep,
+} from "@/runtime/decimal"
+
+const makeDecimal = (s: string) => Decimal128.fromString(s)
+
+// Schema-guided write encode for a full doc (insert / full-replace).
+function encodeDoc(zod: any, doc: any): any {
+  return encodeDecimal128(zod, doc, makeDecimal)
+}
+
+// Schema-guided write encode for an update payload. Aggregation-pipeline
+// updates ([{$set:...}]) are passed through — the result shape can't be
+// statically resolved against the schema. Operator updates encode their
+// `$set`/`$setOnInsert`; a full-replace doc is encoded directly.
+function encodeUpdate(zod: any, update: any): any {
+  if (Array.isArray(update)) return update
+  if (!update || typeof update !== "object") return update
+  if (isUpdateOperatorObject(update)) {
+    const next: any = { ...update }
+    if (next.$set && typeof next.$set === "object") {
+      next.$set = encodeDecimal128Patch(zod, next.$set, makeDecimal)
+    }
+    if (next.$setOnInsert && typeof next.$setOnInsert === "object") {
+      next.$setOnInsert = encodeDecimal128Patch(zod, next.$setOnInsert, makeDecimal)
+    }
+    return next
+  }
+  return encodeDoc(zod, update)
+}
+
+// Wrap a find/aggregate cursor so every doc it yields is decimal-decoded.
+// Chainable methods (sort/limit/skip/project/map/…) return the cursor itself
+// in the mongodb driver — re-wrap so the decode survives the chain. Terminal
+// methods (toArray/next/tryNext/forEach/async-iterator) decode their output.
+function wrapCursorWithDecode(cursor: any): any {
+  if (!cursor || typeof cursor !== "object") return cursor
+  return new Proxy(cursor, {
+    get(target, prop, receiver) {
+      const orig = Reflect.get(target, prop, receiver)
+      if ((prop === "toArray" || prop === "next" || prop === "tryNext") && typeof orig === "function") {
+        return async (...a: any[]) => decodeDecimal128Deep(await orig.apply(target, a))
+      }
+      if (prop === "forEach" && typeof orig === "function") {
+        return (cb: any, ...a: any[]) =>
+          orig.call(target, (d: any) => cb(decodeDecimal128Deep(d)), ...a)
+      }
+      if (prop === Symbol.asyncIterator && typeof orig === "function") {
+        return function () {
+          const it = orig.call(target)
+          return {
+            async next() {
+              const r = await it.next()
+              return r.done ? r : { done: false, value: decodeDecimal128Deep(r.value) }
+            },
+            return: typeof it.return === "function" ? (x: any) => it.return(x) : undefined,
+            [Symbol.asyncIterator]() {
+              return this
+            },
+          }
+        }
+      }
+      if (typeof orig === "function") {
+        return (...a: any[]) => {
+          const res = orig.apply(target, a)
+          if (res === target) return receiver
+          return res && typeof res.toArray === "function" ? wrapCursorWithDecode(res) : res
+        }
+      }
+      return orig
+    },
+  })
+}
 
 function isUpdateOperatorObject(update: any): boolean {
   if (!update || typeof update !== "object") return false
@@ -90,6 +167,10 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
   // Inserts skip the `deletedAt:null` stamp and deletes pass through to
   // MongoDB's native timeseries delete path.
   const timeseries = name ? isTimeseries(name) : false
+  // Decimal128 codec is opt-in per model: skip the encode/decode walks
+  // entirely unless the schema declares at least one `v.decimal128()` field.
+  const zod = name ? getModelZodSchema(name) : undefined
+  const hasDecimal = zod ? schemaHasDecimal128(zod) : false
   return new Proxy(col, {
     get(target, prop, receiver) {
       const original = Reflect.get(target, prop, receiver)
@@ -103,7 +184,8 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
           if (!stamped.createdAt) stamped.createdAt = now
           if (!timeseries && stamped.deletedAt === undefined) stamped.deletedAt = null
           if (validate && name) validateFullDoc(name, "insertOne", stamped)
-          return original.call(target, stamped, ...rest)
+          const enc = hasDecimal ? encodeDoc(zod, stamped) : stamped
+          return original.call(target, enc, ...rest)
         }
       }
       if (prop === "insertMany" && typeof original === "function") {
@@ -121,7 +203,8 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
           if (validate && name) {
             for (const d of stamped) validateFullDoc(name, "insertMany", d)
           }
-          return original.call(target, stamped, ...rest)
+          const enc = hasDecimal ? stamped.map((d: any) => encodeDoc(zod, d)) : stamped
+          return original.call(target, enc, ...rest)
         }
       }
       if ((prop === "updateOne" || prop === "updateMany") && typeof original === "function") {
@@ -129,7 +212,8 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
           const now = Date.now()
           const stampedUpdate = injectUpdatedAt(update, now)
           if (validate && name) validateUpdate(name, prop as string, stampedUpdate)
-          return original.call(target, filter, stampedUpdate, ...rest)
+          const encUpdate = hasDecimal ? encodeUpdate(zod, stampedUpdate) : stampedUpdate
+          return original.call(target, filter, encUpdate, ...rest)
         }
       }
       if (prop === "deleteOne" && typeof original === "function") {
@@ -159,12 +243,21 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
           const now = Date.now()
           const stampedUpdate = injectUpdatedAt(update, now)
           if (validate && name) validateUpdate(name, "findOneAndUpdate", stampedUpdate)
-          return original.call(target, filter, stampedUpdate, ...rest)
+          const encUpdate = hasDecimal ? encodeUpdate(zod, stampedUpdate) : stampedUpdate
+          if (!hasDecimal) return original.call(target, filter, encUpdate, ...rest)
+          return Promise.resolve(original.call(target, filter, encUpdate, ...rest)).then(
+            decodeDecimal128Deep
+          )
         }
       }
       if (prop === "findOneAndDelete" && typeof original === "function") {
         return (filter: any, ...rest: any[]) => {
-          if (!sync || timeseries) return original.call(target, filter, ...rest)
+          if (!sync || timeseries) {
+            if (!hasDecimal) return original.call(target, filter, ...rest)
+            return Promise.resolve(original.call(target, filter, ...rest)).then(
+              decodeDecimal128Deep
+            )
+          }
           const now = Date.now()
           const findOneAndUpdate = (target as any).findOneAndUpdate?.bind(target)
           if (typeof findOneAndUpdate !== "function") {
@@ -177,7 +270,15 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
           )
         }
       }
-      // For everything else (find, aggregate, watch, etc.), bind to the original target.
+      // Read decode — only for models that declare a decimal128 field.
+      if (hasDecimal && prop === "findOne" && typeof original === "function") {
+        return (...a: any[]) =>
+          Promise.resolve(original.apply(target, a)).then(decodeDecimal128Deep)
+      }
+      if (hasDecimal && (prop === "find" || prop === "aggregate") && typeof original === "function") {
+        return (...a: any[]) => wrapCursorWithDecode(original.apply(target, a))
+      }
+      // For everything else (watch, countDocuments, etc.), bind to the original target.
       if (typeof original === "function") return original.bind(target)
       return original
     },
