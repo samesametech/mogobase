@@ -121,13 +121,31 @@ class Handlers {
     const validated = await handler.args.safeParseAsync(args ?? {})
     if (validated.success) {
       const activeDb = ctx.db
+      // Wrap for the read-decode side of the autoStamp codec — decimal128
+      // fields need `Decimal128 → string` on every cursor result, including
+      // query paths. Write-stamping branches inside the wrapper are gated by
+      // the write op name and are dead code on a read-only handler.
+      const wrappedDb = wrapDbWithAutoStamp(activeDb)
+      // Memoize wrapped views per-call: the underlying useDatabase(name) is
+      // already cached on the singleton, but each wrapDbWithAutoStamp produces
+      // a fresh Proxy, so repeat calls to ctx.useDatabase(name) must reuse the
+      // same wrapped instance to preserve identity for handler-side caching.
+      const useDatabaseCache = new Map<string, MogobaseDB>()
+      const useDatabase = (dbName: string) => {
+        let cached = useDatabaseCache.get(dbName)
+        if (!cached) {
+          cached = wrapDbWithAutoStamp(requireDbSingleton("useDatabase").useDatabase(dbName)) as MogobaseDB
+          useDatabaseCache.set(dbName, cached)
+        }
+        return cached
+      }
       return await handler.handler(validated.data, {
         headers: ctx.headers || null,
-        db: activeDb,
+        db: wrappedDb,
         runQuery: (n, a, c) => this._runQuery(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }),
         runMutation: (n, a, c) => this._runMutation(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }),
         watch: ctx.watch || (() => {}),
-        useDatabase: (dbName: string) => requireDbSingleton("useDatabase").useDatabase(dbName),
+        useDatabase,
         useRawDatabase: (alias: string) => requireDbSingleton("useRawDatabase").useRawDatabase(alias),
       })
     } else {
@@ -157,12 +175,21 @@ class Handlers {
     if (validated.success) {
       const activeDb = ctx.db
       const wrappedDb = wrapDbWithAutoStamp(activeDb)
+      const useDatabaseCache = new Map<string, MogobaseDB>()
+      const useDatabase = (dbName: string) => {
+        let cached = useDatabaseCache.get(dbName)
+        if (!cached) {
+          cached = wrapDbWithAutoStamp(requireDbSingleton("useDatabase").useDatabase(dbName)) as MogobaseDB
+          useDatabaseCache.set(dbName, cached)
+        }
+        return cached
+      }
       return await handler.handler(validated.data, {
         headers: ctx.headers || null,
         db: wrappedDb,
         runQuery: (n, a, c) => this._runQuery(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }),
         runMutation: (n, a, c) => this._runMutation(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }),
-        useDatabase: (dbName: string) => wrapDbWithAutoStamp(requireDbSingleton("useDatabase").useDatabase(dbName)),
+        useDatabase,
         useRawDatabase: (alias: string) => requireDbSingleton("useRawDatabase").useRawDatabase(alias),
       })
     } else {
