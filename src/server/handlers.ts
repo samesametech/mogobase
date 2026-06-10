@@ -81,12 +81,13 @@ if (!g[GLOBAL_KEY]) g[GLOBAL_KEY] = {}
 
 class Handlers {
   static get _instance(): Handlers {
-    if (!g[GLOBAL_KEY].instance) g[GLOBAL_KEY].instance = Object.create(Handlers.prototype, {
-      queries: { value: new Map(), enumerable: true },
-      mutations: { value: new Map(), enumerable: true },
-      _queries: { value: new Map(), enumerable: true },
-      _mutations: { value: new Map(), enumerable: true },
-    })
+    if (!g[GLOBAL_KEY].instance)
+      g[GLOBAL_KEY].instance = Object.create(Handlers.prototype, {
+        queries: { value: new Map(), enumerable: true },
+        mutations: { value: new Map(), enumerable: true },
+        _queries: { value: new Map(), enumerable: true },
+        _mutations: { value: new Map(), enumerable: true },
+      })
     return g[GLOBAL_KEY].instance!
   }
   queries!: Map<string, QueryHandler>
@@ -98,17 +99,21 @@ class Handlers {
     return Handlers._instance
   }
 
-  async _runQuery(name: string, args: any, ctx: Context = {}): Promise<any> {
+  // `allowInternal` gates resolution of the in-process-only internal pool. It
+  // is a function PARAMETER, never a field of the client-controllable `ctx`,
+  // so a network caller cannot set it by shaping their request. Network entry
+  // points — the HTTP /api/handlers route (via the public `runQuery` export),
+  // /ws (attachWs/ws), and hono — call with the default `false`, so a
+  // client-supplied "internal.*" name resolves nothing and 404s. Only recursive
+  // ctx.runQuery/ctx.runMutation calls (already inside an authorized handler)
+  // and the explicit runInternalQuery/runInternalMutation entry points pass `true`.
+  async _runQuery(name: string, args: any, ctx: Context = {}, allowInternal = false): Promise<any> {
     let handler = this.queries.get(name)
     if (!handler) {
-      if (name.startsWith("internal")) {
+      if (allowInternal && name.startsWith("internal")) {
         handler = this._queries.get(name)
-        if (!handler) {
-          throw new Error(`Query ${name} not found`)
-        }
-      } else {
-        throw new Error(`Query ${name} not found`)
       }
+      if (!handler) throw new Error(`Query ${name} not found`)
     }
     if (!ctx.db) throw new Error("ctx.db is required — pass the mogobase/db or mogobase/client-db instance")
     // Run the per-request DB resolver once at the entry boundary. Recursive
@@ -142,8 +147,10 @@ class Handlers {
       return await handler.handler(validated.data, {
         headers: ctx.headers || null,
         db: wrappedDb,
-        runQuery: (n, a, c) => this._runQuery(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }),
-        runMutation: (n, a, c) => this._runMutation(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }),
+        runQuery: (n, a, c) =>
+          this._runQuery(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }, true),
+        runMutation: (n, a, c) =>
+          this._runMutation(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }, true),
         watch: ctx.watch || (() => {}),
         useDatabase,
         useRawDatabase: (alias: string) => requireDbSingleton("useRawDatabase").useRawDatabase(alias),
@@ -153,17 +160,14 @@ class Handlers {
     }
   }
 
-  async _runMutation(name: string, args: any, ctx: Context = {}): Promise<any> {
+  // See `_runQuery` for the `allowInternal` rationale — same trust boundary.
+  async _runMutation(name: string, args: any, ctx: Context = {}, allowInternal = false): Promise<any> {
     let handler = this.mutations.get(name)
     if (!handler) {
-      if (name.startsWith("internal")) {
+      if (allowInternal && name.startsWith("internal")) {
         handler = this._mutations.get(name)
-        if (!handler) {
-          throw new Error(`Mutation ${name} not found`)
-        }
-      } else {
-        throw new Error(`Mutation ${name} not found`)
       }
+      if (!handler) throw new Error(`Mutation ${name} not found`)
     }
     if (!ctx.db) throw new Error("ctx.db is required — pass the mogobase/db or mogobase/client-db instance")
     const dbSingleton = getDbSingleton()
@@ -187,8 +191,10 @@ class Handlers {
       return await handler.handler(validated.data, {
         headers: ctx.headers || null,
         db: wrappedDb,
-        runQuery: (n, a, c) => this._runQuery(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }),
-        runMutation: (n, a, c) => this._runMutation(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }),
+        runQuery: (n, a, c) =>
+          this._runQuery(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }, true),
+        runMutation: (n, a, c) =>
+          this._runMutation(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }, true),
         useDatabase,
         useRawDatabase: (alias: string) => requireDbSingleton("useRawDatabase").useRawDatabase(alias),
       })
@@ -246,6 +252,20 @@ export async function runQuery(name: string, args: any, ctx: Context = {}) {
 
 export async function runMutation(name: string, args: any, ctx: Context = {}) {
   return _singleton._runMutation(name, args, ctx)
+}
+
+// In-process-only entry points for invoking `internal.*` handlers. Trusted
+// server code (trigger.dev workers, the webhook route's system-actor path,
+// in-process API routes that authenticate first) imports these to reach the
+// internal pool. They MUST NEVER be wired to a network handler that forwards a
+// client-supplied name — `runQuery`/`runMutation` are the network-safe entry
+// points and refuse the internal pool by construction.
+export async function runInternalQuery(name: string, args: any, ctx: Context = {}) {
+  return _singleton._runQuery(name, args, ctx, true)
+}
+
+export async function runInternalMutation(name: string, args: any, ctx: Context = {}) {
+  return _singleton._runMutation(name, args, ctx, true)
 }
 
 export default _singleton

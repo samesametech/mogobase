@@ -7,6 +7,8 @@ import handlers, {
   internalMutation,
   runQuery,
   runMutation,
+  runInternalQuery,
+  runInternalMutation,
   v,
 } from "@/server/handlers"
 
@@ -77,10 +79,10 @@ describe("arg validation", () => {
 describe("internal handlers and prefix routing", () => {
   beforeEach(() => resetHandlers())
 
-  it("registers internal queries with internal. prefix", async () => {
+  it("registers internal queries with internal. prefix, reachable via runInternalQuery", async () => {
     internalQuery("secret", { args: v.object({}), handler: async () => "ok" })
     expect(handlers._queries.has("internal.secret")).toBe(true)
-    const res = await runQuery("internal.secret", {}, { db: fakeDb })
+    const res = await runInternalQuery("internal.secret", {}, { db: fakeDb })
     expect(res).toBe("ok")
   })
 
@@ -88,13 +90,28 @@ describe("internal handlers and prefix routing", () => {
     mutation("doThing", { args: v.object({}), handler: async () => "public" })
     internalMutation("doThing", { args: v.object({}), handler: async () => "private" })
     const pub = await runMutation("doThing", {}, { db: fakeDb })
-    const priv = await runMutation("internal.doThing", {}, { db: fakeDb })
+    const priv = await runInternalMutation("internal.doThing", {}, { db: fakeDb })
     expect(pub).toBe("public")
     expect(priv).toBe("private")
   })
 
   it("rejects unknown handler with informative error", async () => {
     await expect(runQuery("nope", {}, { db: fakeDb })).rejects.toThrow(/not found/)
+  })
+
+  // Security boundary: the public runQuery/runMutation exports are the
+  // network-facing entry points (HTTP /api/handlers, /ws, hono). They MUST NOT
+  // resolve the in-process-only internal pool, even when the caller names an
+  // internal handler directly — otherwise any authenticated client could invoke
+  // privileged in-process handlers (payment/refund/gateway mutations) over HTTP.
+  it("public runQuery does NOT resolve internal handlers", async () => {
+    internalQuery("secret", { args: v.object({}), handler: async () => "ok" })
+    await expect(runQuery("internal.secret", {}, { db: fakeDb })).rejects.toThrow(/not found/)
+  })
+
+  it("public runMutation does NOT resolve internal handlers", async () => {
+    internalMutation("doThing", { args: v.object({}), handler: async () => "private" })
+    await expect(runMutation("internal.doThing", {}, { db: fakeDb })).rejects.toThrow(/not found/)
   })
 })
 

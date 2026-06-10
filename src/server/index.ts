@@ -5,6 +5,8 @@ import {
   internalMutation,
   runQuery,
   runMutation,
+  runInternalQuery,
+  runInternalMutation,
   v,
 } from "@/server/handlers"
 import { attachMogobaseWebSocket, type AttachMogobaseOptions } from "@/server/attachWs"
@@ -35,6 +37,8 @@ export {
   internalMutation,
   runQuery,
   runMutation,
+  runInternalQuery,
+  runInternalMutation,
   attachMogobaseWebSocket,
   v,
   PaginationQueryArgs,
