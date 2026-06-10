@@ -5,12 +5,7 @@ import { ChangeStream, ChangeStreamOptions, Document } from "mongodb"
 
 import handlers from "./handlers"
 import DB from "@/db"
-import {
-  pullChanges,
-  pushChanges,
-  type SyncPolicy,
-  type SyncPolicyDecision,
-} from "./sync"
+import { pullChanges, pushChanges, type SyncPolicy, type SyncPolicyDecision } from "./sync"
 import { createStreamHub, type StreamHub } from "./streamHub"
 import { createRefetchScheduler } from "./refetchScheduler"
 import { stableStringify } from "./stableStringify"
@@ -45,16 +40,19 @@ type SocketState = {
 export type AttachMogobaseOptions = {
   syncPolicy?: SyncPolicy
   refetchDebounceMs?: number
+  // Sanitizes every error before it is sent to a WS client. Handler errors
+  // otherwise reach the browser verbatim — the same leak the HTTP transport
+  // guards against. Provide an allowlist-style formatter (log the raw error
+  // server-side, return a generic message for anything off-contract) in
+  // production. Defaults to the raw message for backward compatibility.
+  formatError?: (error: unknown) => string
 }
 
-export function attachMogobaseWebSocket(
-  server: HttpServer,
-  path: string = "/ws",
-  options: AttachMogobaseOptions = {}
-) {
+export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws", options: AttachMogobaseOptions = {}) {
   const wss = new WebSocketServer({ noServer: true })
   const state = new Map<string, SocketState>()
   const syncPolicy = options.syncPolicy
+  const formatError = options.formatError ?? ((error: unknown) => `${(error as any)?.message || error}`)
 
   const debounceMs = options.refetchDebounceMs ?? 100
   const scheduler = createRefetchScheduler({ debounceMs })
@@ -116,7 +114,9 @@ export function attachMogobaseWebSocket(
     }
     if (s.hubUnsubs) {
       for (const u of s.hubUnsubs) {
-        try { await u() } catch {}
+        try {
+          await u()
+        } catch {}
       }
     }
     const refreshed = state.get(id)
@@ -166,7 +166,7 @@ export function attachMogobaseWebSocket(
       sendJson(ws, {
         type: "PaginatedQueryResult",
         success: false,
-        error: `${error?.message || error}`,
+        error: formatError(error),
       })
     }
   }
@@ -289,15 +289,11 @@ export function attachMogobaseWebSocket(
           await cs.close()
         } catch {}
       }
-      sendJson(ws, { type: "PaginatedQueryResult", success: false, error: `${error?.message || error}` })
+      sendJson(ws, { type: "PaginatedQueryResult", success: false, error: formatError(error) })
     }
   }
 
-  async function runPaginatedLoadMore(
-    id: string,
-    ws: WebSocket,
-    direction: "next" | "previous"
-  ) {
+  async function runPaginatedLoadMore(id: string, ws: WebSocket, direction: "next" | "previous") {
     const s = state.get(id)
     const sub = s?.paginated
     if (!sub) {
@@ -352,7 +348,7 @@ export function attachMogobaseWebSocket(
             type: "PaginatedQueryPage",
             success: false,
             direction,
-            error: `${error?.message || error}`,
+            error: formatError(error),
           })
         }
       })
@@ -369,18 +365,16 @@ export function attachMogobaseWebSocket(
     const { type, name, args } = data
 
     if (type === "paginated-query-load-next" || type === "paginated-query-load-previous") {
-      return runPaginatedLoadMore(
-        id,
-        ws,
-        type === "paginated-query-load-next" ? "next" : "previous"
-      )
+      return runPaginatedLoadMore(id, ws, type === "paginated-query-load-next" ? "next" : "previous")
     }
 
     if (type === "sync-subscribe") {
       const models: string[] = Array.isArray(data.models) ? data.models : []
       const prev = state.get(id)
       if (prev?.syncUnsub) {
-        try { prev.syncUnsub() } catch {}
+        try {
+          prev.syncUnsub()
+        } catch {}
       }
       const unsubFns: (() => Promise<void>)[] = []
       for (const model of models) {
@@ -400,7 +394,9 @@ export function attachMogobaseWebSocket(
         }
       }
       const aggregateUnsub = () => {
-        for (const u of unsubFns) { u().catch(() => {}) }
+        for (const u of unsubFns) {
+          u().catch(() => {})
+        }
       }
       const current = state.get(id)
       if (current) state.set(id, { ...current, syncUnsub: aggregateUnsub })
@@ -431,7 +427,7 @@ export function attachMogobaseWebSocket(
           type: "SyncPullResult",
           model: data.model,
           success: false,
-          error: `${error?.message || error}`,
+          error: formatError(error),
           documents: [],
           checkpoint: data.checkpoint ?? null,
         })
@@ -460,7 +456,7 @@ export function attachMogobaseWebSocket(
           type: "SyncPushResult",
           model: data.model,
           success: false,
-          error: `${error?.message || error}`,
+          error: formatError(error),
           conflicts: [],
         })
       }
@@ -499,7 +495,9 @@ export function attachMogobaseWebSocket(
                 streams.push(changeStream)
                 state.set(id, { ...s, changeStreams: streams })
                 changeStream.on("change", () => {
-                  scheduler.schedule(queryKey, async () => { await run(true) })
+                  scheduler.schedule(queryKey, async () => {
+                    await run(true)
+                  })
                   s.schedulerKeys?.add(queryKey)
                 })
                 return
@@ -508,7 +506,9 @@ export function attachMogobaseWebSocket(
               hub
                 .subscribe(modelName, normalized.matchFilter, () => {
                   if (ws.readyState !== ws.OPEN) return
-                  scheduler.schedule(queryKey, async () => { await run(true) })
+                  scheduler.schedule(queryKey, async () => {
+                    await run(true)
+                  })
                   s.schedulerKeys?.add(queryKey)
                 })
                 .then((unsub) => {
@@ -528,7 +528,7 @@ export function attachMogobaseWebSocket(
           })
           sendJson(ws, { type: "QueryResult", success: true, data: rs })
         } catch (error: any) {
-          sendJson(ws, { type: "QueryResult", success: false, error: `${error?.message || error}` })
+          sendJson(ws, { type: "QueryResult", success: false, error: formatError(error) })
         }
       }
       run()
@@ -540,7 +540,7 @@ export function attachMogobaseWebSocket(
         const rs = await handlers._runMutation(name, args, { headers, db: DB })
         sendJson(ws, { type: "MutationResult", success: true, data: rs })
       } catch (error: any) {
-        sendJson(ws, { type: "MutationResult", success: false, error: `${error?.message || error}` })
+        sendJson(ws, { type: "MutationResult", success: false, error: formatError(error) })
       }
     } else {
       sendJson(ws, { success: false, error: `Unknown type: ${type}` })
@@ -558,10 +558,16 @@ export function attachMogobaseWebSocket(
       await closePaginatedSub(id)
       const s = state.get(id)
       if (s?.syncUnsub) {
-        try { s.syncUnsub() } catch {}
+        try {
+          s.syncUnsub()
+        } catch {}
       }
       if (s?.hubUnsubs) {
-        for (const u of s.hubUnsubs) { try { await u() } catch {} }
+        for (const u of s.hubUnsubs) {
+          try {
+            await u()
+          } catch {}
+        }
       }
       if (s?.schedulerKeys) {
         for (const k of s.schedulerKeys) scheduler.cancel(k)
@@ -606,7 +612,9 @@ export function attachMogobaseWebSocket(
     // a subsequent attach (or a different upgrade handler) sees a clean server.
     if (server.emit === patchedEmit) server.emit = origEmit
     scheduler.cancelAll()
-    try { await hub.shutdown() } catch {}
+    try {
+      await hub.shutdown()
+    } catch {}
     await new Promise<void>((resolve) => wss.close(() => resolve()))
   }
 
