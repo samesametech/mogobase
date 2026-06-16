@@ -1,6 +1,6 @@
 # Models, Schemas, and Indexes
 
-Models are MongoDB collections with optional zod schemas and indexes. Register them with `defineModel(name, schema?, indexes?)` from `mogobase/runtime`.
+Models are MongoDB collections with optional zod schemas and indexes. Register them with `defineModel(name, schema?, options?)` from `mogobase/runtime`.
 
 ## Where to call defineModel
 
@@ -33,7 +33,7 @@ query("listTodos", {
 
 `defineModel` calls are replayed into whatever `db` backend is active:
 
-- **Online**: `MogobaseDB.defineModel(name, schema, indexes)` creates the collection if missing and applies the indexes.
+- **Online**: `MogobaseDB.defineModel(name, schema, { indexSpecs })` creates the collection if missing and applies the indexes.
 - **Offline (RxDB)**: `MogobaseClientDB.defineModel(name, schema)` registers an RxDB collection.
 - **Offline (WatermelonDB)**: `MogobaseWatermelonDB.defineModel(name, schema)` registers a WatermelonDB table.
 
@@ -48,21 +48,27 @@ The `v` export is `zod/v4`. Schemas are used for:
 Typical model schema patterns:
 
 ```ts
-defineModel("users", v.object({
-  email: v.string().email(),
-  name: v.string(),
-  createdAt: v.number(),
-}))
+defineModel(
+  "users",
+  v.object({
+    email: v.string().email(),
+    name: v.string(),
+    createdAt: v.number(),
+  })
+)
 
-defineModel("posts", v.object({
-  authorId: v.string(),
-  title: v.string(),
-  body: v.string(),
-  tags: v.array(v.string()),
-  published: v.boolean(),
-  createdAt: v.number(),
-  updatedAt: v.number().optional(),
-}))
+defineModel(
+  "posts",
+  v.object({
+    authorId: v.string(),
+    title: v.string(),
+    body: v.string(),
+    tags: v.array(v.string()),
+    published: v.boolean(),
+    createdAt: v.number(),
+    updatedAt: v.number().optional(),
+  })
+)
 ```
 
 Omit `_id` — MongoDB assigns `ObjectId` by default. If you want a string-keyed model, pass `_id: v.string()` and generate IDs yourself.
@@ -73,13 +79,16 @@ Never store money as a float. Use `v.decimal128()` for any monetary amount, rate
 or fee:
 
 ```ts
-defineModel("invoices", v.object({
-  _id: v.string(),
-  currency: v.string(),
-  amount: v.decimal128(),                 // "100.14"
-  taxRate: v.decimal128().nullable(),     // "0.0825" | null
-  lineItems: v.array(v.object({ unitPrice: v.decimal128() })),
-}))
+defineModel(
+  "invoices",
+  v.object({
+    _id: v.string(),
+    currency: v.string(),
+    amount: v.decimal128(), // "100.14"
+    taxRate: v.decimal128().nullable(), // "0.0825" | null
+    lineItems: v.array(v.object({ unitPrice: v.decimal128() })),
+  })
+)
 ```
 
 A `decimal128` field is a **canonical decimal string on the wire and in handler
@@ -106,18 +115,13 @@ Models with no `decimal128` field pay zero codec overhead.
 Indexes pass through to MongoDB's `createIndexes`:
 
 ```ts
-defineModel(
-  "events",
-  v.object({ userId: v.string(), at: v.number(), type: v.string() }),
-  {
-    indexSpecs: [
-      { key: { userId: 1, at: -1 } },
-      { key: { type: 1 } },
-      { key: { at: 1 }, expireAfterSeconds: 60 * 60 * 24 * 30 }, // TTL
-    ],
-    options: { background: true },
-  }
-)
+defineModel("events", v.object({ userId: v.string(), at: v.number(), type: v.string() }), {
+  indexSpecs: [
+    { key: { userId: 1, at: -1 } },
+    { key: { type: 1 }, unique: true },
+    { key: { at: 1 }, expireAfterSeconds: 60 * 60 * 24 * 30 }, // TTL
+  ],
+})
 ```
 
 ## defineModel options
@@ -145,13 +149,13 @@ defineModel(
 )
 ```
 
-| Option | Effect |
-| --- | --- |
-| `indexSpecs` | Passed to MongoDB's `createIndexes`. The engine always adds `updatedAt`, `deletedAt`, `createdAt` indexes on top of yours — sync depends on them. |
-| `clientFields: string[]` | Allowlist of fields shipped to / accepted from clients. Engine fields (`_id`, `createdAt`, `updatedAt`, `deletedAt`) are always included. Used by both `filterClientFields()` (online flow) and the sync engine (pull projection + push allowlist). Omit for no restriction. |
-| `sync: true` | Opt the model into mogobase sync. Default-deny — pull/push/watch on a model without `sync: true` throws. Independent from `clientFields`. |
-| `dbValidation: true` | Validate writes against the model's zod schema at the autoStamp layer. Inserts and full-replace updates are validated as full docs; `$set` / `$setOnInsert` are validated as partials; aggregation-pipeline updates are skipped. Default `false`. See "Database validation" below. |
-| `timeseries: { timeField, metaField?, granularity?, … }` | Create the underlying MongoDB collection as a [time-series collection](https://www.mongodb.com/docs/manual/core/timeseries-collections/). The model's behavior changes — see "Time-series collections" below. Mutually exclusive with `sync: true`. |
+| Option                                                   | Effect                                                                                                                                                                                                                                                                             |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `indexSpecs`                                             | Passed to MongoDB's `createIndexes`. The engine always adds `updatedAt`, `deletedAt`, `createdAt` indexes on top of yours — sync depends on them.                                                                                                                                  |
+| `clientFields: string[]`                                 | Allowlist of fields shipped to / accepted from clients. Engine fields (`_id`, `createdAt`, `updatedAt`, `deletedAt`) are always included. Used by both `filterClientFields()` (online flow) and the sync engine (pull projection + push allowlist). Omit for no restriction.       |
+| `sync: true`                                             | Opt the model into mogobase sync. Default-deny — pull/push/watch on a model without `sync: true` throws. Independent from `clientFields`.                                                                                                                                          |
+| `dbValidation: true`                                     | Validate writes against the model's zod schema at the autoStamp layer. Inserts and full-replace updates are validated as full docs; `$set` / `$setOnInsert` are validated as partials; aggregation-pipeline updates are skipped. Default `false`. See "Database validation" below. |
+| `timeseries: { timeField, metaField?, granularity?, … }` | Create the underlying MongoDB collection as a [time-series collection](https://www.mongodb.com/docs/manual/core/timeseries-collections/). The model's behavior changes — see "Time-series collections" below. Mutually exclusive with `sync: true`.                                |
 
 Use `clientFields` whenever you have server-only fields you don't want
 clients to read or write. Sync-enabled models almost always need it; online-
@@ -180,16 +184,16 @@ defineModel(
 
 What gets validated, what doesn't:
 
-| Operation | Validated as | Notes |
-| --- | --- | --- |
-| `insertOne` / `insertMany` | Full doc | Run **after** auto-stamping, so engine timestamps are present in the parsed payload. |
-| `updateOne` / `updateMany` with `$set` | Partial | Only the fields being set are checked. |
-| `updateOne` / `updateMany` with `$setOnInsert` | Partial | Same as `$set`. |
-| `findOneAndUpdate` | Same as the underlying update | |
-| Full-replace update (no `$`-operators) | Full doc | |
-| Aggregation pipeline update (`[{$set: ...}, ...]`) | **Skipped** | No generic way to statically check the result shape — handler must validate manually if needed. |
-| `findOne` / `find` | Not applicable | Reads are never validated. |
-| Sync push (`pushChanges`) | **Not gated by this flag** | Sync writes go to the raw collection and rely on the policy `transform` callback for shape enforcement. |
+| Operation                                          | Validated as                  | Notes                                                                                                   |
+| -------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `insertOne` / `insertMany`                         | Full doc                      | Run **after** auto-stamping, so engine timestamps are present in the parsed payload.                    |
+| `updateOne` / `updateMany` with `$set`             | Partial                       | Only the fields being set are checked.                                                                  |
+| `updateOne` / `updateMany` with `$setOnInsert`     | Partial                       | Same as `$set`.                                                                                         |
+| `findOneAndUpdate`                                 | Same as the underlying update |                                                                                                         |
+| Full-replace update (no `$`-operators)             | Full doc                      |                                                                                                         |
+| Aggregation pipeline update (`[{$set: ...}, ...]`) | **Skipped**                   | No generic way to statically check the result shape — handler must validate manually if needed.         |
+| `findOne` / `find`                                 | Not applicable                | Reads are never validated.                                                                              |
+| Sync push (`pushChanges`)                          | **Not gated by this flag**    | Sync writes go to the raw collection and rely on the policy `transform` callback for shape enforcement. |
 
 Validation errors throw a single `Error` with a stable prefix:
 
@@ -230,7 +234,7 @@ defineModel(
   v.object({
     sensorId: v.string(),
     value: v.number(),
-    ts: v.date(),         // your timeField
+    ts: v.date(), // your timeField
   }),
   {
     timeseries: {
@@ -267,13 +271,13 @@ query("listReadings", {
 
 ### `timeseries` options
 
-| Field | Required | Effect |
-| --- | --- | --- |
-| `timeField` | yes | Top-level field whose value is a BSON `Date` on each measurement. Inserts without it are rejected by MongoDB. |
-| `metaField` | no | Top-level field used to group measurements (e.g. a sensor ID). MongoDB auto-indexes `{metaField, timeField}`. |
-| `granularity` | no | `"seconds"` / `"minutes"` / `"hours"`. Tells MongoDB how to bucket measurements internally. Mutually exclusive with the explicit `bucketMaxSpanSeconds` / `bucketRoundingSeconds` pair (6.3+). |
-| `bucketMaxSpanSeconds`, `bucketRoundingSeconds` | no | Explicit bucket-span control (MongoDB 6.3+). |
-| `expireAfterSeconds` | no | TTL — buckets older than this are auto-deleted. |
+| Field                                           | Required | Effect                                                                                                                                                                                         |
+| ----------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `timeField`                                     | yes      | Top-level field whose value is a BSON `Date` on each measurement. Inserts without it are rejected by MongoDB.                                                                                  |
+| `metaField`                                     | no       | Top-level field used to group measurements (e.g. a sensor ID). MongoDB auto-indexes `{metaField, timeField}`.                                                                                  |
+| `granularity`                                   | no       | `"seconds"` / `"minutes"` / `"hours"`. Tells MongoDB how to bucket measurements internally. Mutually exclusive with the explicit `bucketMaxSpanSeconds` / `bucketRoundingSeconds` pair (6.3+). |
+| `bucketMaxSpanSeconds`, `bucketRoundingSeconds` | no       | Explicit bucket-span control (MongoDB 6.3+).                                                                                                                                                   |
+| `expireAfterSeconds`                            | no       | TTL — buckets older than this are auto-deleted.                                                                                                                                                |
 
 mogobase calls `db.createCollection(name, { timeseries: { … } })` the first
 time `defineModel` is applied for that `(uri, dbName, modelName)` tuple. If a
@@ -283,14 +287,14 @@ existing collection before turning on `timeseries`.
 
 ### Behavior differences from regular collections
 
-| Aspect | Regular collection | Time-series collection |
-| --- | --- | --- |
-| `insertOne` / `insertMany` auto-stamping | Adds `createdAt`, `updatedAt`, `deletedAt: null` | Adds `createdAt`, `updatedAt` — **no `deletedAt`** (soft-delete doesn't apply) |
-| `deleteOne` / `deleteMany` in sync-enabled handlers | Rewritten to a `$set: { deletedAt }` soft-delete | **Pass through to MongoDB's native delete** — sync is forbidden for timeseries anyway |
-| Auto sync-checkpoint indexes (`updatedAt`, `deletedAt`, `createdAt`) | Always applied | **Skipped** — sync isn't supported, the metaField+timeField auto-index covers the common access pattern |
-| Sync (`sync: true`) | Allowed | **Forbidden** — `defineModel` throws at registration; `pullChanges`/`pushChanges`/`streamChanges` reject at runtime |
-| Update semantics | Arbitrary | Restricted by MongoDB — can't update `timeField`, `metaField`-as-key, etc. In MongoDB 6.0 only inserts + deletes + non-meta-field updates are reliable; 7.0+ lifts most restrictions. |
-| `_id` | Auto-generated `ObjectId` | Same — `mongo-cursor-pagination` paginates by `_id` correctly |
+| Aspect                                                               | Regular collection                               | Time-series collection                                                                                                                                                                |
+| -------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `insertOne` / `insertMany` auto-stamping                             | Adds `createdAt`, `updatedAt`, `deletedAt: null` | Adds `createdAt`, `updatedAt` — **no `deletedAt`** (soft-delete doesn't apply)                                                                                                        |
+| `deleteOne` / `deleteMany` in sync-enabled handlers                  | Rewritten to a `$set: { deletedAt }` soft-delete | **Pass through to MongoDB's native delete** — sync is forbidden for timeseries anyway                                                                                                 |
+| Auto sync-checkpoint indexes (`updatedAt`, `deletedAt`, `createdAt`) | Always applied                                   | **Skipped** — sync isn't supported, the metaField+timeField auto-index covers the common access pattern                                                                               |
+| Sync (`sync: true`)                                                  | Allowed                                          | **Forbidden** — `defineModel` throws at registration; `pullChanges`/`pushChanges`/`streamChanges` reject at runtime                                                                   |
+| Update semantics                                                     | Arbitrary                                        | Restricted by MongoDB — can't update `timeField`, `metaField`-as-key, etc. In MongoDB 6.0 only inserts + deletes + non-meta-field updates are reliable; 7.0+ lifts most restrictions. |
+| `_id`                                                                | Auto-generated `ObjectId`                        | Same — `mongo-cursor-pagination` paginates by `_id` correctly                                                                                                                         |
 
 ### Pagination and filters
 
@@ -303,7 +307,7 @@ import { buildFilters } from "mogobase/db"
 const result = await MongoPaging.find(db.model("sensor_readings"), {
   query: buildFilters({ sensorId: "alpha", value_gte: 100 }),
   limit: 50,
-  paginatedField: "_id",        // or "ts"
+  paginatedField: "_id", // or "ts"
   sortAscending: false,
 })
 ```
@@ -354,7 +358,7 @@ query("listPostsWithAuthors", {
   args: v.object({}),
   handler: async (_args, { db }) => {
     const posts = await db.model("posts").find({}).toArray()
-    const authors = await Promise.all(posts.map(p => userLoader.load(p.authorId)))
+    const authors = await Promise.all(posts.map((p) => userLoader.load(p.authorId)))
     return posts.map((p, i) => ({ ...p, author: authors[i] }))
   },
 })

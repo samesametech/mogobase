@@ -2,6 +2,7 @@
 // at module scope; server + client each consume the registry when they boot.
 
 import { z } from "zod/v4"
+import type { IndexDescription } from "mongodb"
 
 // Engine-managed fields. Always considered client-visible regardless of
 // `clientFields` allowlist — `_id` is identity, the timestamps are needed for
@@ -30,8 +31,12 @@ export type TimeseriesOptions = {
 }
 
 export type ModelOptions = {
-  indexes?: any
-  indexSpecs?: any
+  // MongoDB index definitions, applied via `createIndexes` when the model is
+  // first brought online (server: db/index.ts; client: rxdb/watermelon
+  // backends). Per-index options (`unique`, `sparse`, `partialFilterExpression`,
+  // `expireAfterSeconds`, …) live inside each spec. The engine always adds its
+  // own `updatedAt`/`deletedAt`/`createdAt` sync-checkpoint indexes on top.
+  indexSpecs?: IndexDescription[]
   // Visibility allowlist. Used by:
   //   - filterClientFields(model, docs) to strip server-only fields from
   //     handler return values in the online flow.
@@ -59,8 +64,7 @@ export type ModelOptions = {
 export type ModelDef = {
   name: string
   schema?: any
-  indexes?: any
-  indexSpecs?: any
+  indexSpecs?: IndexDescription[]
   clientFields?: string[]
   sync?: boolean
   dbValidation?: boolean
@@ -112,7 +116,10 @@ function withSyncFields(schema: any): any {
 }
 
 export function defineModel(name: string, schema?: any, options?: ModelOptions | any): void {
-  const opts: ModelOptions = (options && typeof options === "object" && !Array.isArray(options)) ? options : { indexes: options }
+  // A bare 3rd arg (an array of index specs, or undefined) is shorthand for
+  // `{ indexSpecs: arg }`; an object is the full options bag.
+  const opts: ModelOptions =
+    options && typeof options === "object" && !Array.isArray(options) ? options : { indexSpecs: options }
   if (opts.timeseries && opts.sync === true) {
     throw new Error(
       `[mogobase] defineModel("${name}"): \`sync: true\` is incompatible with \`timeseries\`. ` +
@@ -140,6 +147,15 @@ export function defineModel(name: string, schema?: any, options?: ModelOptions |
 
 export function getModels(): ModelDef[] {
   return state.models.slice()
+}
+
+// Wrap a model def's flat `indexSpecs` into the `{ indexSpecs }` envelope the
+// db + client backends pass to `createIndexes`. Single source of truth for both
+// bridges (server connect() and client provider) so they can't drift. Returns
+// undefined when the model declares no custom indexes — the engine still adds
+// its sync-checkpoint indexes on top.
+export function indexEnvelope(def: ModelDef): { indexSpecs: IndexDescription[] } | undefined {
+  return def.indexSpecs?.length ? { indexSpecs: def.indexSpecs } : undefined
 }
 
 // Multiple defineModel() calls for the same name are tolerated (e.g. online +

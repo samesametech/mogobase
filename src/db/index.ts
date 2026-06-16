@@ -1,7 +1,7 @@
 import { Collection, CreateIndexesOptions, Db, Decimal128, IndexDescription, MongoClient, ObjectId } from "mongodb"
 import DataLoader from "dataloader"
 import buildMongoFilters from "./buildMongoFilters"
-import { onModel, TimeseriesOptions } from "@/runtime/models"
+import { onModel, indexEnvelope, TimeseriesOptions } from "@/runtime/models"
 
 const DB_GLOBAL_KEY = "__mogobase_db__"
 const dbGlobal = globalThis as unknown as Record<
@@ -80,7 +80,7 @@ class MogobaseDB {
     if (!this._modelsBound) {
       this._modelsBound = true
       onModel((m) => {
-        this.defineModel(m.name, m.schema, m.indexes, m.timeseries).catch((err) =>
+        this.defineModel(m.name, m.schema, indexEnvelope(m), m.timeseries).catch((err) =>
           console.error(`[mogobase] failed to apply model ${m.name}`, err)
         )
       })
@@ -152,11 +152,24 @@ class MogobaseDB {
     return collection
   }
 
-  getSchema(name: string): { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions }; timeseries?: TimeseriesOptions } | undefined {
+  getSchema(name: string):
+    | {
+        schema?: any
+        indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions }
+        timeseries?: TimeseriesOptions
+      }
+    | undefined {
     return this._schemas.get(name)
   }
 
-  getSchemas(): Map<string, { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions }; timeseries?: TimeseriesOptions }> {
+  getSchemas(): Map<
+    string,
+    {
+      schema?: any
+      indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions }
+      timeseries?: TimeseriesOptions
+    }
+  > {
     return this._schemas
   }
 
@@ -173,7 +186,11 @@ class MogobaseDB {
   async _applyModelToDb(
     dbHandle: Db,
     name: string,
-    entry: { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions }; timeseries?: TimeseriesOptions }
+    entry: {
+      schema?: any
+      indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions }
+      timeseries?: TimeseriesOptions
+    }
   ): Promise<Collection> {
     let collection: Collection
     const ts = entry?.timeseries
@@ -284,7 +301,9 @@ class MogobaseDB {
   async useRawDatabase(name: string): Promise<Db> {
     const alias = this._rawAliases.get(name)
     if (!alias) {
-      throw new Error(`useRawDatabase: alias "${name}" not registered. Call DB.registerDatabase("${name}", { uri, dbName }) at boot.`)
+      throw new Error(
+        `useRawDatabase: alias "${name}" not registered. Call DB.registerDatabase("${name}", { uri, dbName }) at boot.`
+      )
     }
     const client = await this._getOrConnectClient(alias.uri)
     return client.db(alias.dbName)

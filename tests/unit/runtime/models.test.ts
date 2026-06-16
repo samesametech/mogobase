@@ -10,6 +10,7 @@ import {
   getModelZodSchema,
   getTimeseriesOptions,
   isTimeseries,
+  indexEnvelope,
   CLIENT_ENGINE_FIELDS,
 } from "@/runtime/models"
 
@@ -231,6 +232,34 @@ describe("timeseries", () => {
     expect(isTimeseries("readings")).toBe(true)
     expect(isValidationEnabled("readings")).toBe(true)
     expect(getClientFields("readings")).toEqual(["value", "sensorId"])
+  })
+})
+
+describe("indexSpecs", () => {
+  beforeEach(() => resetRegistry())
+
+  const specs = [
+    { key: { gatewayCode: 1, gatewayEventId: 1 }, unique: true, name: "u" },
+    { key: { expiresAt: 1 }, name: "ttl", expireAfterSeconds: 0 },
+  ]
+
+  it("carries indexSpecs on the registered def", () => {
+    defineModel("webhook_events", undefined, { sync: false, indexSpecs: specs })
+    const def = getModels().find((m) => m.name === "webhook_events")
+    expect(def!.indexSpecs).toEqual(specs)
+  })
+
+  it("maps a bare 3rd-arg array to indexSpecs", () => {
+    defineModel("widgets", undefined, specs)
+    expect(getModels().find((m) => m.name === "widgets")!.indexSpecs).toEqual(specs)
+  })
+
+  it("indexEnvelope wraps specs into the createIndexes envelope, undefined when absent", () => {
+    defineModel("with", undefined, { indexSpecs: specs })
+    defineModel("without", undefined, { clientFields: ["a"] })
+    const models = getModels()
+    expect(indexEnvelope(models.find((m) => m.name === "with")!)).toEqual({ indexSpecs: specs })
+    expect(indexEnvelope(models.find((m) => m.name === "without")!)).toBeUndefined()
   })
 })
 

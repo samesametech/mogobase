@@ -20,12 +20,7 @@ export type ModelEntry = {
   indexesText?: string
 }
 
-const HANDLER_FNS = new Set<HandlerKind>([
-  "query",
-  "mutation",
-  "internalQuery",
-  "internalMutation",
-])
+const HANDLER_FNS = new Set<HandlerKind>(["query", "mutation", "internalQuery", "internalMutation"])
 
 export function listHandlerFiles(cwd: string): string[] {
   const dir = path.join(cwd, "mogobase")
@@ -91,16 +86,13 @@ function extractConfigFields(
     const valueText = getText(source, prop.initializer)
     if (name === "args") out.argsText = valueText
     if (name === "schema") out.schemaText = valueText
-    if (name === "indexes") out.indexesText = valueText
+    if (name === "indexSpecs") out.indexesText = valueText
     if (name === "handler") out.handlerPresent = true
   }
   return out
 }
 
-export function parseHandlersInFile(
-  filePath: string,
-  cwd: string
-): { handlers: HandlerEntry[]; models: ModelEntry[] } {
+export function parseHandlersInFile(filePath: string, cwd: string): { handlers: HandlerEntry[]; models: ModelEntry[] } {
   const text = fs.readFileSync(filePath, "utf8")
   const source = ts.createSourceFile(filePath, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
   const handlers: HandlerEntry[] = []

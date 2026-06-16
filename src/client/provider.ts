@@ -37,9 +37,7 @@ export const MogobaseContext = React.createContext<MogobaseContextValue | null>(
 export function useMogobase(): MogobaseContextValue {
   const ctx = React.useContext(MogobaseContext)
   if (!ctx) {
-    throw new Error(
-      "[mogobase] MogobaseContext not found — wrap your app in <MogobaseProvider>."
-    )
+    throw new Error("[mogobase] MogobaseContext not found — wrap your app in <MogobaseProvider>.")
   }
   return ctx
 }
@@ -88,9 +86,9 @@ export function MogobaseProvider(props: MogobaseProviderProps): React.ReactEleme
       await clientDB.connect(dbName)
       if (handlers) await handlers()
       // Apply any models registered via runtime.defineModel() in handler files.
-      const { getModels } = await import("../runtime/models")
+      const { getModels, indexEnvelope } = await import("../runtime/models")
       for (const m of getModels()) {
-        await clientDB.defineModel(m.name, m.schema, m.indexes)
+        await clientDB.defineModel(m.name, m.schema, indexEnvelope(m))
       }
       if (cancelled) return
       setResolvedDB(clientDB)
