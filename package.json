@@ -1,7 +1,7 @@
 {
   "name": "mogobase",
   "type": "module",
-  "version": "3.6.0",
+  "version": "3.6.1",
   "description": "Lightweight Next.js + MongoDB backend with typed handlers, WebSocket live queries, and opt-in offline / local-first sync.",
   "main": "lib/index.js",
   "types": "types/index.d.ts",
@@ -47,6 +47,10 @@
     "./provider": {
       "types": "./types/client/provider.d.ts",
       "default": "./lib/client/provider.js"
+    },
+    "./hooks": {
+      "types": "./types/client/hooks/index.d.ts",
+      "default": "./lib/client/hooks/index.js"
     },
     "./sync-types": {
       "types": "./types/client/sync-types.d.ts",
