@@ -40,6 +40,12 @@ type SocketState = {
 export type AttachMogobaseOptions = {
   syncPolicy?: SyncPolicy
   refetchDebounceMs?: number
+  // Interval for protocol-level ping frames to every client. Keeps sockets
+  // alive through idle-timeout proxies (Cloudflare drops a WebSocket after
+  // 100 s of silence) and reaps dead ones: a client that misses a whole
+  // interval without a pong is terminated, which frees its change streams
+  // and hub subscriptions. 0 disables. Default 30 000.
+  heartbeatMs?: number
   // Sanitizes every error before it is sent to a WS client. Handler errors
   // otherwise reach the browser verbatim — the same leak the HTTP transport
   // guards against. Provide an allowlist-style formatter (log the raw error
@@ -56,6 +62,26 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
 
   const debounceMs = options.refetchDebounceMs ?? 100
   const scheduler = createRefetchScheduler({ debounceMs })
+
+  const heartbeatMs = options.heartbeatMs ?? 30_000
+  // Any frame resets a proxy's idle clock, so pings keep quiet sockets open;
+  // and a socket that misses a whole interval without a pong is dead half-open
+  // TCP — terminate() fires 'close', which runs the normal cleanup.
+  const alive = new WeakSet<WebSocket>()
+  const heartbeat =
+    heartbeatMs > 0
+      ? setInterval(() => {
+          for (const ws of wss.clients) {
+            if (!alive.has(ws)) {
+              ws.terminate()
+              continue
+            }
+            alive.delete(ws)
+            if (ws.readyState === ws.OPEN) ws.ping()
+          }
+        }, heartbeatMs)
+      : undefined
+  heartbeat?.unref?.()
   const hub: StreamHub = createStreamHub({
     openStream: async (model) => {
       await DB.connect()
@@ -550,6 +576,8 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
   wss.on("connection", (ws, req) => {
     const id = randomUUID()
     state.set(id, { ws })
+    alive.add(ws)
+    ws.on("pong", () => alive.add(ws))
     ws.on("message", (buf) => {
       handleEvent(buf.toString(), ws, id, req.headers)
     })
@@ -611,6 +639,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
     // Restore the upgrade-emit shadow so this attach can be released by GC and
     // a subsequent attach (or a different upgrade handler) sees a clean server.
     if (server.emit === patchedEmit) server.emit = origEmit
+    if (heartbeat) clearInterval(heartbeat)
     scheduler.cancelAll()
     try {
       await hub.shutdown()

@@ -1,16 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useMogobase } from "../provider"
 import { runQuery } from "../../runtime"
-
-function wsUrl(): string {
-  const override = process.env.NEXT_MOGOBASE_URL || process.env.MOGOBASE_URL
-  if (override) return override.replace(/^http/, "ws") + "/ws"
-  if (typeof window !== "undefined") {
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
-    return `${proto}//${window.location.host}/ws`
-  }
-  return "ws://localhost:3000/ws"
-}
+import { openResilientWs, type ResilientWs } from "./wsConnect"
 
 const mergeArray = (arr1: any[], arr2: any[], key: string, insert: boolean = false) => {
   const result = [...arr1]
@@ -18,21 +9,11 @@ const mergeArray = (arr1: any[], arr2: any[], key: string, insert: boolean = fal
     const foundIndex = result.findIndex((i) => i[key] === item[key])
     if (foundIndex >= 0) {
       result[foundIndex] = item
-      continue
     } else if (insert) {
       result.push(item)
     }
   }
   return result
-}
-
-function safeCloseWS(ws: WebSocket | null | undefined) {
-  if (!ws) return
-  if (ws.readyState === WebSocket.CONNECTING) {
-    ws.addEventListener("open", () => ws.close(), { once: true })
-  } else if (ws.readyState === WebSocket.OPEN) {
-    ws.close()
-  }
 }
 
 type PaginationData = {
@@ -46,25 +27,29 @@ type PaginationData = {
 function usePaginatedQuery(name: string, args?: any, paginationData: PaginationData = { pageSize: 10 }) {
   const { online, sync, ready, clientDB } = useMogobase()
   const [data, setData] = useState<any[]>([])
-  const [loading, setLoading] = useState<boolean>(false)
+  // True before the effect below opens the transport: `results` is [] on the first render
+  // either way, and a table told "not loading" there flashes its empty state for a frame.
+  const [loading, setLoading] = useState<boolean>(true)
   const [hasNext, setHasNext] = useState<boolean>(false)
   const [hasPrevious, setHasPrevious] = useState<boolean>(false)
 
-  const ws = useRef<WebSocket | null>(null)
+  const conn = useRef<ResilientWs | null>(null)
   const sortAscending = paginationData.sortAscending ?? true
 
   const argsKey = typeof args === "object" ? JSON.stringify(args) : args
 
   const sendLoadNext = useCallback(() => {
-    if (ws.current?.readyState !== WebSocket.OPEN) return
+    const socket = conn.current?.socket
+    if (socket?.readyState !== WebSocket.OPEN) return
     setLoading(true)
-    ws.current.send(JSON.stringify({ type: "paginated-query-load-next" }))
+    socket.send(JSON.stringify({ type: "paginated-query-load-next" }))
   }, [])
 
   const sendLoadPrevious = useCallback(() => {
-    if (ws.current?.readyState !== WebSocket.OPEN) return
+    const socket = conn.current?.socket
+    if (socket?.readyState !== WebSocket.OPEN) return
     setLoading(true)
-    ws.current.send(JSON.stringify({ type: "paginated-query-load-previous" }))
+    socket.send(JSON.stringify({ type: "paginated-query-load-previous" }))
   }, [])
 
   // --- Offline path state ---
@@ -73,78 +58,67 @@ function usePaginatedQuery(name: string, args?: any, paginationData: PaginationD
   const offlineRunRef = useRef<((direction?: "next" | "previous") => Promise<void>) | null>(null)
 
   useEffect(() => {
-    if (argsKey === "skip") return
+    // A skipped query is never in flight — without this the initial `true` above would
+    // leave the table loading forever.
+    if (argsKey === "skip") {
+      setLoading(false)
+      return
+    }
     if (online && !sync) {
-      const wsLocal = new WebSocket(wsUrl())
-      ws.current = wsLocal
       setLoading(true)
-
-      wsLocal.addEventListener("open", () => {
-        if (ws.current !== wsLocal) return
-        wsLocal.send(
-          JSON.stringify({
-            type: "paginated-query",
-            name,
-            args: {
-              ...(args || {}),
-              paginationOpts: {
-                limit: paginationData.pageSize,
-                sortAscending,
-                sortCaseInsensitive: paginationData.sortCaseInsensitive ?? false,
-              },
+      const connLocal = openResilientWs({
+        label: `usePaginatedQuery(${name})`,
+        // A reconnect rebuilds the server-side sub from scratch, so the result that
+        // follows is page one again — pages loaded past it collapse until re-paged.
+        subscribeMsg: () => ({
+          type: "paginated-query",
+          name,
+          args: {
+            ...(args || {}),
+            paginationOpts: {
+              limit: paginationData.pageSize,
+              sortAscending,
+              sortCaseInsensitive: paginationData.sortCaseInsensitive ?? false,
             },
-          })
-        )
-      })
-
-      wsLocal.addEventListener("message", (event) => {
-        const rs = JSON.parse(event.data)
-        if (rs.type === "PaginatedQueryResult") {
-          setLoading(false)
-          if (rs.success) {
-            const { results, hasPrevious: hp, hasNext: hn } = rs.data
-            setHasNext(!!hn)
-            setHasPrevious(!!hp)
-            setData(results || [])
-          } else {
-            console.error(rs.error)
-          }
-        } else if (rs.type === "PaginatedQueryPage") {
-          setLoading(false)
-          if (rs.success) {
-            const { results, hasPrevious: hp, hasNext: hn } = rs.data
-            if (rs.direction === "next") {
+          },
+        }),
+        onMessage: (rs) => {
+          if (rs.type === "PaginatedQueryResult") {
+            setLoading(false)
+            if (rs.success) {
+              const { results, hasPrevious: hp, hasNext: hn } = rs.data
               setHasNext(!!hn)
-              setData((d) => mergeArray(d, results, "_id", true))
-            } else {
               setHasPrevious(!!hp)
-              setData((d) => {
-                const existingIds = new Set(d.map((x) => x._id))
-                const prepend = (results || []).filter((x: any) => !existingIds.has(x._id))
-                return [...prepend, ...d]
-              })
+              setData(results || [])
+            } else {
+              console.error(rs.error)
             }
-          } else {
-            console.error(rs.error)
+          } else if (rs.type === "PaginatedQueryPage") {
+            setLoading(false)
+            if (rs.success) {
+              const { results, hasPrevious: hp, hasNext: hn } = rs.data
+              if (rs.direction === "next") {
+                setHasNext(!!hn)
+                setData((d) => mergeArray(d, results, "_id", true))
+              } else {
+                setHasPrevious(!!hp)
+                setData((d) => {
+                  const existingIds = new Set(d.map((x) => x._id))
+                  const prepend = (results || []).filter((x: any) => !existingIds.has(x._id))
+                  return [...prepend, ...d]
+                })
+              }
+            } else {
+              console.error(rs.error)
+            }
           }
-        }
+        },
       })
-
-      wsLocal.addEventListener("error", (event) => {
-        setLoading(false)
-        console.error(`[mogobase] usePaginatedQuery(${name}) ws error`, event)
-      })
-
-      wsLocal.addEventListener("close", (event) => {
-        setLoading(false)
-        if (!event.wasClean) {
-          console.warn(`[mogobase] usePaginatedQuery(${name}) ws closed`, event.code, event.reason)
-        }
-      })
+      conn.current = connLocal
 
       return () => {
-        if (ws.current === wsLocal) ws.current = null
-        safeCloseWS(wsLocal)
+        if (conn.current === connLocal) conn.current = null
+        connLocal.close()
         setData([])
         setHasNext(false)
         setHasPrevious(false)
