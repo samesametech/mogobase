@@ -160,14 +160,20 @@ class WebSocket {
       queue: Promise.resolve(),
     }
 
+    // ONE resolution for the handler and the change streams it opens. Resolving in two
+    // places is how they drift apart: with a per-request resolver the handler reads the
+    // tenant's database while the watch listens to the default one, so the query answers
+    // correctly once and then never updates. Nothing throws.
+    const active = (await (DB as any)._resolveActive(headers)) as typeof DB
     try {
       const rs = await handlers._runQuery(name, args, {
         headers: headers || null,
-        db: DB,
+        db: active,
+        _resolved: true,
         watch: (modelName: string, pipelineOrFilter?: Document[] | Document) => {
           if (socket?.readyState !== 1) return
           const pipeline = normalizeWatchInputToPipeline(pipelineOrFilter)
-          const cs = DB.model(modelName).watch(pipeline, {
+          const cs = active.model(modelName).watch(pipeline, {
             fullDocument: "updateLookup",
           } as ChangeStreamOptions)
           pendingStreams.push(cs)
@@ -394,9 +400,12 @@ class WebSocket {
       await this._closeStreams(id)
       const func = async (noWatch?: boolean) => {
         await DB.connect()
+        // Same rule as the paginated path above: resolve once, hand it to both.
+        const active = (await (DB as any)._resolveActive(headers)) as typeof DB
         rs = await handlers._runQuery(name, args, {
           headers: headers || null,
-          db: DB,
+          db: active,
+          _resolved: true,
           watch: (
             modelName: string,
             pipelineOrFilter?: Document[] | Document,
@@ -407,7 +416,7 @@ class WebSocket {
             const state = this._state.get(id)
             if (!state) return
             const pipeline = normalizeWatchInputToPipeline(pipelineOrFilter)
-            const changeStream = DB.model(modelName).watch(pipeline, {
+            const changeStream = active.model(modelName).watch(pipeline, {
               ...(options || {}),
               fullDocument: "updateLookup",
             })

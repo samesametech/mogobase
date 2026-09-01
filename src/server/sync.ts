@@ -48,9 +48,9 @@ let _sharedHub: StreamHub | null = null
 function sharedHub(): StreamHub {
   if (_sharedHub) return _sharedHub
   _sharedHub = createStreamHub({
-    openStream: async (model) => {
+    openStream: async (dbName, model) => {
       await DB.connect()
-      return DB.model(model).watch([], { fullDocument: "updateLookup" }) as any
+      return DB.useDatabase(dbName).model(model).watch([], { fullDocument: "updateLookup" }) as any
     },
   })
   return _sharedHub
@@ -346,8 +346,12 @@ export function streamChanges(
         // an unfiltered hub subscription (matches all docs for that model).
         // The primary new path in attachWs.ts subscribes via hub.subscribe
         // directly and never calls streamChanges anymore.
+        //
+        // The DEFAULT database, explicitly: sync is documented as bound to MONGO_DB
+        // (multi-tenant sync is not supported), and this legacy path has no request to
+        // resolve one from. Naming it beats inheriting whatever the hub keyed first.
         try {
-          const unsub = await sharedHub().subscribe(model, undefined, () => onEvent(model))
+          const unsub = await sharedHub().subscribe(DB.db.databaseName, model, undefined, () => onEvent(model))
           // Caller may have invoked the cleanup fn between the await above and
           // this push. If so, the cleanup-path already iterated `unsubs`, so
           // unwind this subscription inline rather than orphaning it.

@@ -83,11 +83,22 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       : undefined
   heartbeat?.unref?.()
   const hub: StreamHub = createStreamHub({
-    openStream: async (model) => {
+    openStream: async (dbName, model) => {
       await DB.connect()
-      return DB.model(model).watch([], { fullDocument: "updateLookup" }) as any
+      return DB.useDatabase(dbName).model(model).watch([], { fullDocument: "updateLookup" }) as any
     },
   })
+
+  // THE database this socket's request resolves to — run once per subscribe, and used for
+  // BOTH the handler and the change streams it opens. Resolving separately in two places is
+  // how they drift: with a per-request resolver (DB.setRequestResolver) the handler would
+  // read the tenant's database while the watch listened to the default one, so the query
+  // returned correct rows exactly once and then never updated again. Nothing throws, and a
+  // screen that has simply stopped refreshing looks like a slow network.
+  const resolveActive = async (headers: IncomingMessage["headers"]) => {
+    await DB.connect()
+    return (await (DB as any)._resolveActive(headers)) as typeof DB
+  }
 
   async function evaluatePolicy(
     op: "pull" | "push" | "watch",
@@ -173,10 +184,11 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
     const callArgs = { ...sub.baseArgs, paginationOpts }
 
     try {
-      await DB.connect()
+      const active = await resolveActive(sub.headers)
       const rs = await handlers._runQuery(sub.name, callArgs, {
         headers: sub.headers,
-        db: DB,
+        db: active,
+        _resolved: true,
         watch: () => {},
       })
       if (!rs?.results) throw new Error("Invalid paginated result")
@@ -233,15 +245,18 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       queue: Promise.resolve(),
     }
 
+    const active = await resolveActive(headers)
+    const activeDbName = active.db.databaseName
     try {
       const rs = await handlers._runQuery(name, args, {
         headers,
-        db: DB,
+        db: active,
+        _resolved: true,
         watch: (modelName: string, pipelineOrFilter?: Document[] | Document) => {
           if (ws.readyState !== ws.OPEN) return
           const normalized = normalizeWatchInput(pipelineOrFilter)
           if (normalized.kind === "pipeline") {
-            const cs = DB.model(modelName).watch(normalized.pipeline, {
+            const cs = active.model(modelName).watch(normalized.pipeline, {
               fullDocument: "updateLookup",
             } as ChangeStreamOptions)
             pendingStreams.push(cs)
@@ -289,7 +304,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       const hubUnsubsForPaginated: (() => Promise<void>)[] = []
       for (const spec of hubSpecsForPaginated) {
         try {
-          const unsub = await hub.subscribe(spec.model, spec.filter, () => {
+          const unsub = await hub.subscribe(activeDbName, spec.model, spec.filter, () => {
             if (ws.readyState !== ws.OPEN) return
             scheduler.schedule(paginatedKey, async () => {
               scheduleRefetch(id, ws, sub)
@@ -353,10 +368,11 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       .then(async () => {
         if (ws.readyState !== ws.OPEN) return
         try {
-          await DB.connect()
+          const activeMore = await resolveActive(sub.headers)
           const rs = await handlers._runQuery(sub.name, callArgs, {
             headers: sub.headers,
-            db: DB,
+            db: activeMore,
+            _resolved: true,
             watch: () => {},
           })
           if (!rs?.results) throw new Error("Invalid paginated result")
@@ -402,6 +418,8 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
           prev.syncUnsub()
         } catch {}
       }
+      const syncActive = await resolveActive(headers)
+      const syncDbName = syncActive.db.databaseName
       const unsubFns: (() => Promise<void>)[] = []
       for (const model of models) {
         const decision = await evaluatePolicy("watch", model, headers)
@@ -411,7 +429,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
           // to a change-event $match so the streamHub matcher can evaluate it
           // against `change.fullDocument.X` and still notify on tombstones.
           const matchFilter = bareFilterToChangeEventMatch(decision.filter)
-          const unsub = await hub.subscribe(model, matchFilter, () => {
+          const unsub = await hub.subscribe(syncDbName, model, matchFilter, () => {
             sendJson(ws, { type: "sync-stream", model })
           })
           unsubFns.push(unsub)
@@ -498,11 +516,12 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       const queryKey = `${id}:${name}:${stableStringify(args ?? {})}`
 
       const run = async (noWatch?: boolean) => {
-        await DB.connect()
+        const queryActive = await resolveActive(headers)
         try {
           const rs = await handlers._runQuery(name, args, {
             headers,
-            db: DB,
+            db: queryActive,
+            _resolved: true,
             watch: (modelName: string, pipelineOrFilter?: Document[] | Document, watchOpts?: any) => {
               if (noWatch) return
               if (ws.readyState !== ws.OPEN) return
@@ -511,7 +530,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
 
               const normalized = normalizeWatchInput(pipelineOrFilter)
               if (normalized.kind === "pipeline") {
-                const changeStream = DB.model(modelName).watch(normalized.pipeline, {
+                const changeStream = queryActive.model(modelName).watch(normalized.pipeline, {
                   ...(watchOpts || {}),
                   fullDocument: "updateLookup",
                   fullDocumentBeforeChange: "whenAvailable",
@@ -530,7 +549,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
               }
 
               hub
-                .subscribe(modelName, normalized.matchFilter, () => {
+                .subscribe(queryActive.db.databaseName, modelName, normalized.matchFilter, () => {
                   if (ws.readyState !== ws.OPEN) return
                   scheduler.schedule(queryKey, async () => {
                     await run(true)

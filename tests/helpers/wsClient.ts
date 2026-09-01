@@ -1,7 +1,9 @@
 import WebSocket from "ws"
 
-export function createWsClient(url: string) {
-  const ws = new WebSocket(url)
+export function createWsClient(url: string, headers?: Record<string, string>) {
+  // Headers ride the HANDSHAKE, which is the only place a browser-equivalent client can put
+  // them — and the only thing a per-request DB resolver has to key on for a socket.
+  const ws = new WebSocket(url, headers ? { headers } : undefined)
   const inbox: any[] = []
   const waiters: ((msg: any) => boolean)[] = []
   ws.on("message", (buf) => {
