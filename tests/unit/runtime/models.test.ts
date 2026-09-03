@@ -64,14 +64,26 @@ describe("defineModel + withSyncFields", () => {
     defineModel("widgets", schema)
     const widgetDef = getModels().find((m) => m.name === "widgets")
     const merged = (widgetDef!.schema as any).shape
-    // Should be a number-typed schema, not the consumer's string.
-    // In Zod v4, ZodNumber has _def.type === "number".
-    const isNumberSchema =
-      merged.updatedAt instanceof z4.ZodNumber ||
-      merged.updatedAt._def?.type === "number" ||
-      merged.updatedAt._def?.typeName === "ZodNumber" ||
-      merged.updatedAt.constructor.name.toLowerCase().includes("number")
-    expect(isNumberSchema).toBe(true)
+    // Asserted by what the schema ACCEPTS rather than by its class: the engine
+    // stamp is a union (number | Date), so a `instanceof ZodNumber` check would
+    // pin the implementation instead of the contract.
+    expect(merged.updatedAt.safeParse(Date.now()).success).toBe(true)
+    expect(merged.updatedAt.safeParse(new Date()).success).toBe(true)
+    // The consumer's `z4.string()` did NOT win.
+    expect(merged.updatedAt.safeParse("2026-09-03").success).toBe(false)
+  })
+
+  it("engine timestamps take a Date as well as epoch milliseconds", () => {
+    defineModel("stamped", z4.object({ name: z4.string() }))
+    const shape = (getModels().find((m) => m.name === "stamped")!.schema as any).shape
+    for (const field of ["createdAt", "updatedAt", "deletedAt"]) {
+      expect(shape[field].safeParse(1788220800000).success).toBe(true)
+      expect(shape[field].safeParse(new Date()).success).toBe(true)
+    }
+    // Only deletedAt is nullable — an absent tombstone is a value, a missing
+    // birth stamp is the bug this union exists alongside.
+    expect(shape.deletedAt.safeParse(null).success).toBe(true)
+    expect(shape.createdAt.safeParse(null).success).toBe(false)
   })
 
   it("supports schema-less models (just sync fields)", () => {

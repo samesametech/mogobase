@@ -83,13 +83,23 @@ function isZodType(x: any): boolean {
   return !!x && typeof x === "object" && typeof x._def === "object" && typeof x.parse === "function"
 }
 
-// Auto-inject sync timestamp fields. Sync correctness depends on these being
-// present and numeric — handler authors don't have to declare them.
+// The engine's own stamp. The wrapper WRITES epoch milliseconds — a number is
+// what the sync checkpoint compares and what a range query on `updatedAt` sorts
+// correctly — but a Date is accepted on the way in, because plenty of documents
+// arrive carrying one: a migration, a bulk import, a hand-written seed, or a
+// caller who simply passed `new Date()`. The stamp is preserved rather than
+// overwritten in that case (the doc spread wins in `insertOne`), so refusing it
+// here would fail a write whose value the engine had already chosen to keep.
+// Readers must therefore accept both — `syncUpdatedAt()` in server/sync.ts
+// already does.
+const engineTimestamp = () => z.union([z.number(), z.date()])
+
+// Auto-inject sync timestamp fields — handler authors don't have to declare them.
 function withSyncFields(schema: any): any {
   const syncFields = {
-    createdAt: z.number(),
-    updatedAt: z.number(),
-    deletedAt: z.number().nullable(),
+    createdAt: engineTimestamp(),
+    updatedAt: engineTimestamp(),
+    deletedAt: engineTimestamp().nullable(),
   }
 
   if (schema == null) {

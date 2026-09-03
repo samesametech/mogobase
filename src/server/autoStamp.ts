@@ -169,6 +169,46 @@ function injectUpdatedAt(update: any, now: number): any {
   return { ...update, updatedAt: now }
 }
 
+/**
+ * The birth stamps for an UPSERT, in `$setOnInsert` so they apply only on the
+ * insert branch.
+ *
+ * `injectUpdatedAt` alone leaves an upsert-born document with `updatedAt` and
+ * nothing else: `createdAt` is missing, so every screen that renders one gets
+ * `undefined` — which `new Date(undefined)` and dayjs both read as NOW, so the
+ * row silently reports today, every day, forever. `deletedAt` is missing too,
+ * so a sync-enabled model's tombstone filters skip the row.
+ *
+ * `$setOnInsert` and `$set` must not name the same path (MongoDB errors), which
+ * is exactly why `updatedAt` stays in `$set` and only the birth stamps go here.
+ * A caller who supplied either one keeps it — same precedence as `insertOne`,
+ * where the document spread wins over the stamp.
+ */
+function injectInsertStamps(update: any, now: number, timeseries: boolean): any {
+  // An aggregation-pipeline update has no `$setOnInsert` stage to add to; its
+  // upsert branch is Mongo's own and cannot be stamped from here.
+  if (Array.isArray(update)) return update
+  // A full-replace upsert inserts the replacement document verbatim, so the
+  // stamps belong in the document itself.
+  if (!isUpdateOperatorObject(update)) {
+    const replacement = { ...update }
+    if (replacement.createdAt === undefined) replacement.createdAt = now
+    if (!timeseries && replacement.deletedAt === undefined) replacement.deletedAt = null
+    return replacement
+  }
+  const next = { ...update }
+  const onInsert = { ...(next.$setOnInsert || {}) }
+  const claimed = (path: string) =>
+    onInsert[path] !== undefined || (next.$set && next.$set[path] !== undefined)
+  if (!claimed("createdAt")) onInsert.createdAt = now
+  if (!timeseries && !claimed("deletedAt")) onInsert.deletedAt = null
+  next.$setOnInsert = onInsert
+  return next
+}
+
+/** Whether a driver options bag (or a bulkWrite op) asked for an upsert. */
+const isUpsert = (options: any): boolean => options?.upsert === true
+
 function wrapCollectionWithAutoStamp(col: any, name?: string): any {
   if (!col) return col
   const sync = name ? isSyncEnabled(name) : false
@@ -221,10 +261,22 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
       if ((prop === "updateOne" || prop === "updateMany") && typeof original === "function") {
         return (filter: any, update: any, ...rest: any[]) => {
           const now = Date.now()
-          const stampedUpdate = injectUpdatedAt(update, now)
+          let stampedUpdate = injectUpdatedAt(update, now)
+          // An upsert that INSERTS is a birth, and has to be stamped like one.
+          if (isUpsert(rest[0])) stampedUpdate = injectInsertStamps(stampedUpdate, now, timeseries)
           if (validate && name) validateUpdate(name, prop as string, stampedUpdate)
           const encUpdate = hasDecimal ? encodeUpdate(zod, stampedUpdate) : stampedUpdate
           return original.call(target, filter, encUpdate, ...rest)
+        }
+      }
+      if (prop === "replaceOne" && typeof original === "function") {
+        return (filter: any, replacement: any, ...rest: any[]) => {
+          const now = Date.now()
+          let next = { ...(replacement || {}), updatedAt: now }
+          if (isUpsert(rest[0])) next = injectInsertStamps(next, now, timeseries)
+          if (validate && name) validateFullDoc(name, "replaceOne", next)
+          const enc = hasDecimal ? encodeDoc(zod, next) : next
+          return original.call(target, filter, enc, ...rest)
         }
       }
       if (prop === "deleteOne" && typeof original === "function") {
@@ -252,7 +304,8 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
       if (prop === "findOneAndUpdate" && typeof original === "function") {
         return (filter: any, update: any, ...rest: any[]) => {
           const now = Date.now()
-          const stampedUpdate = injectUpdatedAt(update, now)
+          let stampedUpdate = injectUpdatedAt(update, now)
+          if (isUpsert(rest[0])) stampedUpdate = injectInsertStamps(stampedUpdate, now, timeseries)
           if (validate && name) validateUpdate(name, "findOneAndUpdate", stampedUpdate)
           const encUpdate = hasDecimal ? encodeUpdate(zod, stampedUpdate) : stampedUpdate
           if (!hasDecimal) return original.call(target, filter, encUpdate, ...rest)
@@ -279,6 +332,64 @@ function wrapCollectionWithAutoStamp(col: any, name?: string): any {
             { $set: { deletedAt: now, updatedAt: now } },
             ...rest
           )
+        }
+      }
+      /**
+       * `bulkWrite` used to fall through to the driver untouched, so every
+       * document it inserted or upserted was born with NO engine stamps at all
+       * — the one write path that silently opted out of the whole contract.
+       * Metrics rollups and importers reach for it precisely because they write
+       * many rows, so the gap scaled with volume.
+       *
+       * Each operation is stamped exactly as its single-document twin would be,
+       * including per-op `upsert`, which bulkWrite carries on the op rather than
+       * in an options bag. Deletes on a sync model are rewritten to tombstone
+       * updates for the same reason `deleteOne` is.
+       */
+      if (prop === "bulkWrite" && typeof original === "function") {
+        return (operations: any[], ...rest: any[]) => {
+          const now = Date.now()
+          const stampInsert = (doc: any) => {
+            const next: any = timeseries
+              ? { createdAt: now, updatedAt: now, ...(doc || {}) }
+              : { createdAt: now, updatedAt: now, deletedAt: null, ...(doc || {}) }
+            if (!next.updatedAt) next.updatedAt = now
+            if (!next.createdAt) next.createdAt = now
+            if (!timeseries && next.deletedAt === undefined) next.deletedAt = null
+            if (validate && name) validateFullDoc(name, "bulkWrite", next)
+            return hasDecimal ? encodeDoc(zod, next) : next
+          }
+          const stampUpdate = (op: any, kind: string) => {
+            let update = injectUpdatedAt(op.update, now)
+            if (isUpsert(op)) update = injectInsertStamps(update, now, timeseries)
+            if (validate && name) validateUpdate(name, kind, update)
+            return { ...op, update: hasDecimal ? encodeUpdate(zod, update) : update }
+          }
+          const stamped = (operations || []).map((op: any) => {
+            if (!op || typeof op !== "object") return op
+            if (op.insertOne) return { insertOne: { ...op.insertOne, document: stampInsert(op.insertOne.document) } }
+            if (op.updateOne) return { updateOne: stampUpdate(op.updateOne, "bulkWrite.updateOne") }
+            if (op.updateMany) return { updateMany: stampUpdate(op.updateMany, "bulkWrite.updateMany") }
+            if (op.replaceOne) {
+              let replacement = { ...(op.replaceOne.replacement || {}), updatedAt: now }
+              if (isUpsert(op.replaceOne)) replacement = injectInsertStamps(replacement, now, timeseries)
+              if (validate && name) validateFullDoc(name, "bulkWrite.replaceOne", replacement)
+              return {
+                replaceOne: {
+                  ...op.replaceOne,
+                  replacement: hasDecimal ? encodeDoc(zod, replacement) : replacement,
+                },
+              }
+            }
+            // Soft-delete rewrite, mirroring deleteOne/deleteMany above: a sync
+            // model propagates tombstones, so a hard delete in a bulk batch would
+            // vanish from every client's checkpoint without one.
+            if (!sync || timeseries) return op
+            if (op.deleteOne) return { updateOne: { filter: op.deleteOne.filter, update: { $set: { deletedAt: now, updatedAt: now } } } }
+            if (op.deleteMany) return { updateMany: { filter: op.deleteMany.filter, update: { $set: { deletedAt: now, updatedAt: now } } } }
+            return op
+          })
+          return original.call(target, stamped, ...rest)
         }
       }
       // Read decode — only for models that declare a decimal128 field.

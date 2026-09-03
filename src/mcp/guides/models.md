@@ -103,6 +103,27 @@ automatic and lives in the autoStamp write seam (`_runMutation` path):
   `find()`/`aggregate()` cursor is decoded back to a string, so handlers and
   clients always see `"100.14"`, never a BSON object.
 
+## Engine stamps
+
+`createdAt`, `updatedAt` and `deletedAt` are injected for you — you never declare
+them, and they are always client-visible. Written as **epoch milliseconds**,
+which is what the sync checkpoint compares; a `Date` you supply yourself is kept
+as-is and validates fine, because the schema accepts `number | Date`.
+
+Every write path stamps, including the two that are easy to forget:
+
+- **Upserts.** An upsert that inserts is a birth, so `createdAt` and
+  `deletedAt: null` go into `$setOnInsert` (never `$set` — MongoDB errors if a
+  path appears in both), while `updatedAt` stays in `$set`. Values you supplied
+  yourself win, the same precedence `insertOne` gives a document field.
+- **`bulkWrite`.** Each operation is stamped exactly as its single-document twin
+  would be, honouring the per-op `upsert` flag; on a sync model its deletes are
+  rewritten to tombstones like `deleteOne`'s.
+
+An aggregation-pipeline update (`[{ $set: … }]`) gets `updatedAt` appended as a
+final stage. Its upsert branch is MongoDB's own and cannot be stamped from here,
+so pass an operator update if you need the birth stamps.
+
 Storing the real numeric BSON type (not a string) is what makes server-side
 numeric comparison/aggregation correct: `amount_gt`, `$gte`, `$sum`, `$avg`,
 and cross-numeric-type matches all work, with none of the lexicographic
@@ -289,8 +310,8 @@ existing collection before turning on `timeseries`.
 
 | Aspect                                                               | Regular collection                               | Time-series collection                                                                                                                                                                |
 | -------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `insertOne` / `insertMany` auto-stamping                             | Adds `createdAt`, `updatedAt`, `deletedAt: null` | Adds `createdAt`, `updatedAt` — **no `deletedAt`** (soft-delete doesn't apply)                                                                                                        |
-| `deleteOne` / `deleteMany` in sync-enabled handlers                  | Rewritten to a `$set: { deletedAt }` soft-delete | **Pass through to MongoDB's native delete** — sync is forbidden for timeseries anyway                                                                                                 |
+| `insertOne` / `insertMany` / `bulkWrite` inserts, upserts             | Adds `createdAt`, `updatedAt`, `deletedAt: null` | Adds `createdAt`, `updatedAt` — **no `deletedAt`** (soft-delete doesn't apply)                                                                                                        |
+| `deleteOne` / `deleteMany` (including inside `bulkWrite`) in sync    | Rewritten to a `$set: { deletedAt }` soft-delete | **Pass through to MongoDB's native delete** — sync is forbidden for timeseries anyway                                                                                                 |
 | Auto sync-checkpoint indexes (`updatedAt`, `deletedAt`, `createdAt`) | Always applied                                   | **Skipped** — sync isn't supported, the metaField+timeField auto-index covers the common access pattern                                                                               |
 | Sync (`sync: true`)                                                  | Allowed                                          | **Forbidden** — `defineModel` throws at registration; `pullChanges`/`pushChanges`/`streamChanges` reject at runtime                                                                   |
 | Update semantics                                                     | Arbitrary                                        | Restricted by MongoDB — can't update `timeField`, `metaField`-as-key, etc. In MongoDB 6.0 only inserts + deletes + non-meta-field updates are reliable; 7.0+ lifts most restrictions. |

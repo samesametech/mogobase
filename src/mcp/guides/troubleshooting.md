@@ -226,9 +226,31 @@ The handler is running in the browser (offline / sync mode) and called `ctx.useD
 
 `ctx.useRawDatabase("X")` was called without a matching `DB.registerDatabase("X", { uri, dbName })` at boot. Make sure the `registerDatabase` call lives in a module that `server.ts` actually imports — a top-level `import "./mogobase/databases"` at the top of `server.ts` is the simplest wiring.
 
-## Multi-DB: writes on `ctx.useDatabase(...)` aren't stamped
+## Rows with no `createdAt` / `updatedAt` / `deletedAt`
 
-Confirm the call is inside a **mutation** handler, not a query. `ctx.useDatabase` in a mutation returns an autoStamp-wrapped view; in a query it's unwrapped (queries don't stamp anything). If you need stamped writes from a query path, refactor into an `internalMutation` and invoke it via `ctx.runMutation("internal.<name>", args)`.
+The stamp is not a property of the collection — it is a Proxy the handler
+runtime wraps around the `db` it hands you. `ctx.db` and `ctx.useDatabase(...)`
+are wrapped in both queries and mutations. **A db handle you obtained any other
+way is not.**
+
+The usual cause is a write from outside a handler: a framework route (a webhook
+receiver, a file proxy, an inbound-API logger) that holds the `DB` singleton
+directly. Wrap it once and it stamps like a handler's:
+
+```ts
+import { wrapDbWithAutoStamp } from "mogobase/server"
+
+const db = wrapDbWithAutoStamp(dbName ? DB.useDatabase(dbName) : DB)
+await db.model("webhook_logs").insertOne({ _id: `whl_${ulid()}`, ... })
+```
+
+`ctx.useRawDatabase(name)` is never wrapped, by design — it hands back the raw
+driver `Db` for a foreign cluster, with no schema awareness to stamp against.
+
+Symptom worth knowing, because nothing throws: a missing `createdAt` reaches the
+UI as `undefined`, and `new Date(undefined)` / dayjs both render that as **now** —
+so the row reports today, every day, forever. A backfill can recover the real
+value when `_id` is a ULID, which encodes its own creation millisecond.
 
 ## Time-series: `Model "X" is a time-series collection. Sync is not supported`
 

@@ -23,6 +23,8 @@ function makeFakeDb() {
     findOne: make("findOne"),
     find: make("find"),
     findOneAndUpdate: make("findOneAndUpdate"),
+    replaceOne: make("replaceOne"),
+    bulkWrite: make("bulkWrite"),
   } as any
   return {
     model: vi.fn(() => collection),
@@ -357,6 +359,98 @@ describe("wrapDbWithAutoStamp + timeseries", () => {
     await wrapped.model("ts_widgets_del").deleteOne({ sensorId: "s1" })
     expect(db.collection.deleteOne).toHaveBeenCalledWith({ sensorId: "s1" })
     expect(db.collection.updateOne).not.toHaveBeenCalled()
+  })
+
+
+  // ——— Upserts. An upsert that inserts is a BIRTH: it used to land with only
+  // `updatedAt`, so `createdAt` was undefined and every screen rendering it read
+  // `undefined` as NOW — a row that reports today, every day, forever.
+
+  it("stamps createdAt + deletedAt in $setOnInsert on an upsert", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped
+      .model("widgets")
+      .updateOne({ key: "k" }, { $set: { hits: 1 }, $setOnInsert: { _id: "w1" } }, { upsert: true })
+    const [, update] = db.collection.updateOne.mock.calls[0]
+    expect(update.$set.updatedAt).toBe(now)
+    expect(update.$setOnInsert).toEqual({ _id: "w1", createdAt: now, deletedAt: null })
+    // The same path must never appear in both operators — MongoDB errors on it.
+    expect(update.$set.createdAt).toBeUndefined()
+  })
+
+  it("leaves a plain update alone — no $setOnInsert without upsert", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("widgets").updateOne({ _id: "w1" }, { $set: { hits: 2 } })
+    const [, update] = db.collection.updateOne.mock.calls[0]
+    expect(update.$setOnInsert).toBeUndefined()
+    expect(update.$set.updatedAt).toBe(now)
+  })
+
+  it("keeps a caller's own createdAt on an upsert", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped
+      .model("widgets")
+      .updateOne({ key: "k" }, { $setOnInsert: { createdAt: 42 } }, { upsert: true })
+    const [, update] = db.collection.updateOne.mock.calls[0]
+    expect(update.$setOnInsert.createdAt).toBe(42)
+  })
+
+  it("stamps an upserting findOneAndUpdate and updateMany too", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("widgets").findOneAndUpdate({ key: "k" }, { $set: { a: 1 } }, { upsert: true })
+    expect(db.collection.findOneAndUpdate.mock.calls[0][1].$setOnInsert.createdAt).toBe(now)
+    await wrapped.model("widgets").updateMany({ key: "k" }, { $set: { a: 1 } }, { upsert: true })
+    expect(db.collection.updateMany.mock.calls[0][1].$setOnInsert.createdAt).toBe(now)
+  })
+
+  it("stamps a replaceOne, and gives an upserting one its birth stamps", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("widgets").replaceOne({ _id: "w1" }, { name: "b" })
+    const plain = db.collection.replaceOne.mock.calls[0][1]
+    expect(plain.updatedAt).toBe(now)
+    expect(plain.createdAt).toBeUndefined()
+    await wrapped.model("widgets").replaceOne({ _id: "w2" }, { name: "c" }, { upsert: true })
+    const upserted = db.collection.replaceOne.mock.calls[1][1]
+    expect(upserted.createdAt).toBe(now)
+    expect(upserted.deletedAt).toBeNull()
+  })
+
+  // ——— bulkWrite. It used to fall through to the driver untouched, so it was the
+  // one write path that opted out of the contract entirely — and rollups reach for
+  // it precisely because they write many rows, so the gap scaled with volume.
+
+  it("stamps every operation kind in a bulkWrite", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("widgets").bulkWrite([
+      { insertOne: { document: { _id: "a", name: "a" } } },
+      { updateOne: { filter: { _id: "b" }, update: { $set: { n: 1 } }, upsert: true } },
+      { updateMany: { filter: { k: 1 }, update: { $set: { n: 2 } } } },
+      { replaceOne: { filter: { _id: "c" }, replacement: { name: "c" }, upsert: true } },
+    ])
+    const [ops] = db.collection.bulkWrite.mock.calls[0]
+    expect(ops[0].insertOne.document).toMatchObject({ createdAt: now, updatedAt: now, deletedAt: null })
+    expect(ops[1].updateOne.update.$set.updatedAt).toBe(now)
+    expect(ops[1].updateOne.update.$setOnInsert).toEqual({ createdAt: now, deletedAt: null })
+    expect(ops[1].updateOne.upsert).toBe(true)
+    // No upsert on this one, so no birth stamps — it can only ever match rows
+    // that already have them.
+    expect(ops[2].updateMany.update.$setOnInsert).toBeUndefined()
+    expect(ops[2].updateMany.update.$set.updatedAt).toBe(now)
+    expect(ops[3].replaceOne.replacement).toMatchObject({ createdAt: now, updatedAt: now })
+  })
+
+  it("passes a bulkWrite delete through for a non-sync model", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    await wrapped.model("widgets").bulkWrite([{ deleteOne: { filter: { _id: "a" } } }])
+    const [ops] = db.collection.bulkWrite.mock.calls[0]
+    expect(ops[0].deleteOne).toBeDefined()
   })
 
   it("preserves consumer-supplied timestamps on timeseries inserts", async () => {
