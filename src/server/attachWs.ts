@@ -52,6 +52,12 @@ export type AttachMogobaseOptions = {
   // server-side, return a generic message for anything off-contract) in
   // production. Defaults to the raw message for backward compatibility.
   formatError?: (error: unknown) => string
+  // Which database a model's change stream opens on. Default: the one the query read (the
+  // resolved request database, see resolveActive below). Return another name for a
+  // collection that lives in ONE database whatever the request resolves to — identity,
+  // reference tables — or the stream listens to an empty copy there and the subscription
+  // answers correctly once and never re-runs. null / undefined keeps the default.
+  watchDatabaseFor?: (model: string, activeDbName: string) => string | null | undefined
 }
 
 export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws", options: AttachMogobaseOptions = {}) {
@@ -98,6 +104,13 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
   const resolveActive = async (headers: IncomingMessage["headers"]) => {
     await DB.connect()
     return (await (DB as any)._resolveActive(headers)) as typeof DB
+  }
+  // The one exception to "watch what you read": a collection the app says lives elsewhere.
+  const watchDbName = (model: string, activeDbName: string) =>
+    options.watchDatabaseFor?.(model, activeDbName) || activeDbName
+  const watchDb = (model: string, active: typeof DB) => {
+    const name = watchDbName(model, active.db.databaseName)
+    return name === active.db.databaseName ? active : (DB.useDatabase(name) as typeof DB)
   }
 
   async function evaluatePolicy(
@@ -256,9 +269,9 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
           if (ws.readyState !== ws.OPEN) return
           const normalized = normalizeWatchInput(pipelineOrFilter)
           if (normalized.kind === "pipeline") {
-            const cs = active.model(modelName).watch(normalized.pipeline, {
-              fullDocument: "updateLookup",
-            } as ChangeStreamOptions)
+            const cs = watchDb(modelName, active)
+              .model(modelName)
+              .watch(normalized.pipeline, { fullDocument: "updateLookup" } as ChangeStreamOptions)
             pendingStreams.push(cs)
             return
           }
@@ -304,7 +317,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
       const hubUnsubsForPaginated: (() => Promise<void>)[] = []
       for (const spec of hubSpecsForPaginated) {
         try {
-          const unsub = await hub.subscribe(activeDbName, spec.model, spec.filter, () => {
+          const unsub = await hub.subscribe(watchDbName(spec.model, activeDbName), spec.model, spec.filter, () => {
             if (ws.readyState !== ws.OPEN) return
             scheduler.schedule(paginatedKey, async () => {
               scheduleRefetch(id, ws, sub)
@@ -429,7 +442,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
           // to a change-event $match so the streamHub matcher can evaluate it
           // against `change.fullDocument.X` and still notify on tombstones.
           const matchFilter = bareFilterToChangeEventMatch(decision.filter)
-          const unsub = await hub.subscribe(syncDbName, model, matchFilter, () => {
+          const unsub = await hub.subscribe(watchDbName(model, syncDbName), model, matchFilter, () => {
             sendJson(ws, { type: "sync-stream", model })
           })
           unsubFns.push(unsub)
@@ -530,7 +543,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
 
               const normalized = normalizeWatchInput(pipelineOrFilter)
               if (normalized.kind === "pipeline") {
-                const changeStream = queryActive.model(modelName).watch(normalized.pipeline, {
+                const changeStream = watchDb(modelName, queryActive).model(modelName).watch(normalized.pipeline, {
                   ...(watchOpts || {}),
                   fullDocument: "updateLookup",
                   fullDocumentBeforeChange: "whenAvailable",
@@ -549,7 +562,7 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
               }
 
               hub
-                .subscribe(queryActive.db.databaseName, modelName, normalized.matchFilter, () => {
+                .subscribe(watchDbName(modelName, queryActive.db.databaseName), modelName, normalized.matchFilter, () => {
                   if (ws.readyState !== ws.OPEN) return
                   scheduler.schedule(queryKey, async () => {
                     await run(true)

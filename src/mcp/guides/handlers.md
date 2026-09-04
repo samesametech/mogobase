@@ -114,6 +114,18 @@ Resolver semantics:
 
 You do **not** need to call `registerDatabase` for resolver-returned names — `useDatabase(name)` is what the resolver actually binds, and it pools the connection on the default `MONGO_URI` automatically.
 
+#### Collections that live in one database
+
+A change stream follows the database the query **read** (the resolved one), which is right for tenant data. A collection you keep in one database whatever the request resolves to — identity, reference tables — must be watched there instead, or the stream opens on the tenant's empty copy and the subscription answers correctly once and never re-runs. Name those collections when attaching:
+
+```ts
+attachMogobaseWebSocket(server, "/ws", {
+  watchDatabaseFor: (model, activeDbName) => (SHARED.includes(model) ? process.env.MONGO_DB : null),
+})
+```
+
+Return a database name to redirect that model's stream, `null` / `undefined` to keep the default. The handler still has to read the collection from that database itself (`ctx.useDatabase(name)`); the option only decides where the watch listens.
+
 ### Pattern 2 — Explicit `ctx.useDatabase` (no resolver)
 
 If only some handlers are multi-tenant, skip the resolver and pick a DB inline:
