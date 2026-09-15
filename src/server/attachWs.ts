@@ -543,11 +543,13 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
 
               const normalized = normalizeWatchInput(pipelineOrFilter)
               if (normalized.kind === "pipeline") {
-                const changeStream = watchDb(modelName, queryActive).model(modelName).watch(normalized.pipeline, {
-                  ...(watchOpts || {}),
-                  fullDocument: "updateLookup",
-                  fullDocumentBeforeChange: "whenAvailable",
-                } as ChangeStreamOptions)
+                const changeStream = watchDb(modelName, queryActive)
+                  .model(modelName)
+                  .watch(normalized.pipeline, {
+                    ...(watchOpts || {}),
+                    fullDocument: "updateLookup",
+                    fullDocumentBeforeChange: "whenAvailable",
+                  } as ChangeStreamOptions)
                 bindStreamToWs(ws, changeStream)
                 const streams: ChangeStream[] = s.changeStreams || []
                 streams.push(changeStream)
@@ -562,13 +564,18 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
               }
 
               hub
-                .subscribe(watchDbName(modelName, queryActive.db.databaseName), modelName, normalized.matchFilter, () => {
-                  if (ws.readyState !== ws.OPEN) return
-                  scheduler.schedule(queryKey, async () => {
-                    await run(true)
-                  })
-                  s.schedulerKeys?.add(queryKey)
-                })
+                .subscribe(
+                  watchDbName(modelName, queryActive.db.databaseName),
+                  modelName,
+                  normalized.matchFilter,
+                  () => {
+                    if (ws.readyState !== ws.OPEN) return
+                    scheduler.schedule(queryKey, async () => {
+                      await run(true)
+                    })
+                    s.schedulerKeys?.add(queryKey)
+                  }
+                )
                 .then((unsub) => {
                   const cur = state.get(id)
                   if (!cur || ws.readyState !== ws.OPEN) {
@@ -593,13 +600,26 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
     } else if (type === "paginated-query") {
       await runPaginatedInitial(id, ws, headers, name, args)
     } else if (type === "mutation") {
-      await DB.connect()
-      try {
-        const rs = await handlers._runMutation(name, args, { headers, db: DB })
-        sendJson(ws, { type: "MutationResult", success: true, data: rs })
-      } catch (error: any) {
-        sendJson(ws, { type: "MutationResult", success: false, error: formatError(error) })
-      }
+      // MUTATIONS DO NOT TRAVEL OVER THE SOCKET. `useMutation` has always POSTed to
+      // /api/handlers when online and run against the client DB when offline, so this branch
+      // served no first-party caller — but it ran the full public mutation set under the
+      // handshake's session, which made it a second write door nobody instruments.
+      //
+      // That is what broke: an app wrapping its HTTP routes to record WHO is acting (an audit
+      // trail, a request id, a tenant stamp) covers the door it knows about, and writes
+      // arriving here carry none of it. The authorization is identical — the same
+      // requireUser, the same handler — so nothing looks wrong; the write is simply
+      // unattributed. A door that cannot be instrumented from outside the library is better
+      // closed than documented.
+      //
+      // Refused rather than removed, so a caller relying on it gets an error naming the fix
+      // instead of a silent no-op.
+      sendJson(ws, {
+        type: "MutationResult",
+        success: false,
+        error:
+          "[mogobase] Mutations are not accepted over the WebSocket — POST them to /api/handlers, which is what useMutation does.",
+      })
     } else {
       sendJson(ws, { success: false, error: `Unknown type: ${type}` })
     }

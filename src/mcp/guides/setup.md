@@ -111,7 +111,7 @@ export default function Providers({ children }: { children: React.ReactNode }) {
 
 Then mount `<Providers>` inside `app/layout.tsx`. When `online={false}`, the provider connects `clientDB`, runs `handlers()` so handler registrations land in the runtime singleton, and replays `defineModel` calls against the local store.
 
-For online-only apps, skip the offline backend install, the `clientDB` prop, and `handlers` — the WebSocket path serves all queries and mutations.
+For online-only apps, skip the offline backend install, the `clientDB` prop, and `handlers` — the WebSocket path serves every query, and `useMutation` POSTs to `/api/handlers`. Mutation frames sent to the socket are refused (3.10.0): they bypassed anything an app wraps around its HTTP routes, so a write arriving there carried no request id, no audit actor and no tenant stamp.
 
 ## Step 5b (sync only) — Wire a SyncPolicy
 

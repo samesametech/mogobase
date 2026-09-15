@@ -49,11 +49,7 @@ class WebSocket {
     this._syncPolicy = policy
   }
 
-  async _evaluatePolicy(
-    op: "pull" | "push" | "watch",
-    model: string,
-    headers: any
-  ): Promise<SyncPolicyDecision> {
+  async _evaluatePolicy(op: "pull" | "push" | "watch", model: string, headers: any): Promise<SyncPolicyDecision> {
     if (!this._syncPolicy) return { allow: true }
     try {
       return await this._syncPolicy({ op, model, headers })
@@ -295,18 +291,16 @@ class WebSocket {
     const { type, name, args } = data
 
     if (type === "paginated-query-load-next" || type === "paginated-query-load-previous") {
-      return this._runPaginatedLoadMore(
-        socket,
-        id,
-        type === "paginated-query-load-next" ? "next" : "previous"
-      )
+      return this._runPaginatedLoadMore(socket, id, type === "paginated-query-load-next" ? "next" : "previous")
     }
 
     if (type === "sync-subscribe") {
       const models: string[] = Array.isArray(data.models) ? data.models : []
       const prev = this._state.get(id)
       if (prev?.syncUnsub) {
-        try { prev.syncUnsub() } catch {}
+        try {
+          prev.syncUnsub()
+        } catch {}
       }
       const specs: { model: string; pipeline?: any[] }[] = []
       for (const model of models) {
@@ -406,11 +400,7 @@ class WebSocket {
           headers: headers || null,
           db: active,
           _resolved: true,
-          watch: (
-            modelName: string,
-            pipelineOrFilter?: Document[] | Document,
-            options?: ChangeStreamOptions
-          ) => {
+          watch: (modelName: string, pipelineOrFilter?: Document[] | Document, options?: ChangeStreamOptions) => {
             if (noWatch) return
             if (socket?.readyState !== 1) return
             const state = this._state.get(id)
@@ -435,12 +425,28 @@ class WebSocket {
     } else if (type === "paginated-query") {
       await this._runPaginatedInitial(socket, id, headers, name, args)
     } else if (type === "mutation") {
-      await DB.connect()
-      rs = await handlers._runMutation(name, args, {
-        headers: headers || null,
-        db: DB,
-      })
-      socket.send(JSON.stringify({ type: "MutationResult", success: true, data: rs }))
+      // MUTATIONS DO NOT TRAVEL OVER THE SOCKET. `useMutation` has always POSTed to
+      // /api/handlers when online and run against the client DB when offline, so this branch
+      // served no first-party caller — but it ran the full public mutation set under the
+      // handshake's session, which made it a second write door nobody instruments.
+      //
+      // That is what broke: an app wrapping its HTTP routes to record WHO is acting (an audit
+      // trail, a request id, a tenant stamp) covers the door it knows about, and writes
+      // arriving here carry none of it. The authorization is identical — the same
+      // requireUser, the same handler — so nothing looks wrong; the write is simply
+      // unattributed. A door that cannot be instrumented from outside the library is better
+      // closed than documented.
+      //
+      // Refused rather than removed, so a caller relying on it gets an error naming the fix
+      // instead of a silent no-op.
+      socket.send(
+        JSON.stringify({
+          type: "MutationResult",
+          success: false,
+          error:
+            "[mogobase] Mutations are not accepted over the WebSocket — POST them to /api/handlers, which is what useMutation does.",
+        })
+      )
     }
   }
 
@@ -468,7 +474,9 @@ class WebSocket {
           await this._closePaginatedSub(id)
           const s = this._state.get(id)
           if (s?.syncUnsub) {
-            try { s.syncUnsub() } catch {}
+            try {
+              s.syncUnsub()
+            } catch {}
           }
           this._state.delete(id)
         },
