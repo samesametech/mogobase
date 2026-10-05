@@ -35,6 +35,9 @@ type SocketState = {
   syncUnsub?: () => void
   hubUnsubs?: (() => Promise<void>)[]
   schedulerKeys?: Set<string>
+  // Bumped by every clearWatchers. A query run registers its watches only while the epoch it
+  // started under is current, so a torn-down or superseded subscription cannot re-arm itself.
+  epoch?: number
 }
 
 export type AttachMogobaseOptions = {
@@ -132,14 +135,16 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
   }
 
   const closeStreams = async (id: string) => {
-    const streams = state.get(id)?.changeStreams || []
+    const current = state.get(id)
+    if (!current) return
+    // Detach before awaiting, so a stream registered meanwhile is not dropped unclosed.
+    const streams = current.changeStreams || []
+    state.set(id, { ...current, changeStreams: [] })
     for (const cs of streams) {
       try {
         await cs.close()
       } catch {}
     }
-    const current = state.get(id)
-    if (current) state.set(id, { ...current, changeStreams: [] })
   }
 
   const closePaginatedSub = async (id: string) => {
@@ -159,19 +164,14 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
   const clearWatchers = async (id: string) => {
     const s = state.get(id)
     if (!s) return
-    if (s.schedulerKeys) {
-      for (const k of s.schedulerKeys) scheduler.cancel(k)
-    }
-    if (s.hubUnsubs) {
-      for (const u of s.hubUnsubs) {
-        try {
-          await u()
-        } catch {}
-      }
-    }
-    const refreshed = state.get(id)
-    if (refreshed) {
-      state.set(id, { ...refreshed, hubUnsubs: [], schedulerKeys: new Set() })
+    // Detach and bump the epoch BEFORE awaiting: a hub.subscribe still in flight then sees
+    // the new epoch and unsubscribes itself instead of landing on the cleared list.
+    state.set(id, { ...s, hubUnsubs: [], schedulerKeys: new Set(), epoch: (s.epoch ?? 0) + 1 })
+    for (const k of s.schedulerKeys ?? []) scheduler.cancel(k)
+    for (const u of s.hubUnsubs ?? []) {
+      try {
+        await u()
+      } catch {}
     }
   }
 
@@ -214,6 +214,12 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
 
       sendJson(ws, { type: "PaginatedQueryResult", success: true, data: rs })
     } catch (error: any) {
+      // Refused (access revoked since the last run) or failing: stop streaming, or every write to the watched
+      // collection keeps producing a frame. The client re-subscribes to resume.
+      if (state.get(id)?.paginated === sub) {
+        await closePaginatedSub(id)
+        await clearWatchers(id)
+      }
       sendJson(ws, {
         type: "PaginatedQueryResult",
         success: false,
@@ -523,76 +529,76 @@ export function attachMogobaseWebSocket(server: HttpServer, path: string = "/ws"
     if (!name) return sendJson(ws, { success: false, error: "Name is required" })
 
     if (type === "query") {
-      await closeStreams(id)
       await clearWatchers(id)
+      await closeStreams(id)
 
+      const epoch = state.get(id)?.epoch
+      const live = () => ws.readyState === ws.OPEN && state.get(id)?.epoch === epoch
       const queryKey = `${id}:${name}:${stableStringify(args ?? {})}`
+      const refetch = () => {
+        if (ws.readyState !== ws.OPEN) return
+        scheduler.schedule(queryKey, async () => {
+          await run(true)
+        })
+        state.get(id)?.schedulerKeys?.add(queryKey)
+      }
 
+      // Re-runs pass noWatch: the first successful run registered everything already.
       const run = async (noWatch?: boolean) => {
-        const queryActive = await resolveActive(headers)
+        // Buffered, and registered only once the handler SUCCEEDS. Handlers call watch() before
+        // their auth gate, so registering inline left a refused caller subscribed to another
+        // tenant's writes — each one a fresh "Forbidden" frame, i.e. a write-activity oracle.
+        const watches: [string, (Document[] | Document)?, any?][] = []
         try {
+          const queryActive = await resolveActive(headers)
           const rs = await handlers._runQuery(name, args, {
             headers,
             db: queryActive,
             _resolved: true,
-            watch: (modelName: string, pipelineOrFilter?: Document[] | Document, watchOpts?: any) => {
-              if (noWatch) return
-              if (ws.readyState !== ws.OPEN) return
-              const s = state.get(id)
-              if (!s) return
-
-              const normalized = normalizeWatchInput(pipelineOrFilter)
-              if (normalized.kind === "pipeline") {
-                const changeStream = watchDb(modelName, queryActive)
-                  .model(modelName)
-                  .watch(normalized.pipeline, {
-                    ...(watchOpts || {}),
-                    fullDocument: "updateLookup",
-                    fullDocumentBeforeChange: "whenAvailable",
-                  } as ChangeStreamOptions)
-                bindStreamToWs(ws, changeStream)
-                const streams: ChangeStream[] = s.changeStreams || []
-                streams.push(changeStream)
-                state.set(id, { ...s, changeStreams: streams })
-                changeStream.on("change", () => {
-                  scheduler.schedule(queryKey, async () => {
-                    await run(true)
-                  })
-                  s.schedulerKeys?.add(queryKey)
-                })
-                return
-              }
-
-              hub
-                .subscribe(
-                  watchDbName(modelName, queryActive.db.databaseName),
-                  modelName,
-                  normalized.matchFilter,
-                  () => {
-                    if (ws.readyState !== ws.OPEN) return
-                    scheduler.schedule(queryKey, async () => {
-                      await run(true)
-                    })
-                    s.schedulerKeys?.add(queryKey)
-                  }
-                )
-                .then((unsub) => {
-                  const cur = state.get(id)
-                  if (!cur || ws.readyState !== ws.OPEN) {
-                    unsub().catch(() => {})
-                    return
-                  }
-                  cur.hubUnsubs = cur.hubUnsubs || []
-                  cur.hubUnsubs.push(unsub)
-                  state.set(id, cur)
-                })
-                .catch((err) => {
-                  console.warn(`[mogobase/attachWs] hub.subscribe failed for ${modelName}:`, err)
-                })
+            watch: (...w: [string, (Document[] | Document)?, any?]) => {
+              if (!noWatch) watches.push(w)
             },
           })
+          for (const [modelName, pipelineOrFilter, watchOpts] of live() ? watches : []) {
+            const normalized = normalizeWatchInput(pipelineOrFilter)
+            if (normalized.kind === "pipeline") {
+              const changeStream = watchDb(modelName, queryActive)
+                .model(modelName)
+                .watch(normalized.pipeline, {
+                  ...(watchOpts || {}),
+                  fullDocument: "updateLookup",
+                  fullDocumentBeforeChange: "whenAvailable",
+                } as ChangeStreamOptions)
+              bindStreamToWs(ws, changeStream)
+              const s = state.get(id)!
+              state.set(id, { ...s, changeStreams: [...(s.changeStreams || []), changeStream] })
+              changeStream.on("change", refetch)
+              continue
+            }
+
+            hub
+              .subscribe(watchDbName(modelName, queryActive.db.databaseName), modelName, normalized.matchFilter, refetch)
+              .then((unsub) => {
+                const cur = state.get(id)
+                if (!cur || !live()) {
+                  unsub().catch(() => {})
+                  return
+                }
+                cur.hubUnsubs = cur.hubUnsubs || []
+                cur.hubUnsubs.push(unsub)
+              })
+              .catch((err) => {
+                console.warn(`[mogobase/attachWs] hub.subscribe failed for ${modelName}:`, err)
+              })
+          }
           sendJson(ws, { type: "QueryResult", success: true, data: rs })
         } catch (error: any) {
+          // Refused, or revoked since the last run: stop streaming. A transient failure ends the
+          // live subscription too — fail closed; the client re-subscribes to resume.
+          if (state.get(id)?.epoch === epoch) {
+            await clearWatchers(id)
+            await closeStreams(id)
+          }
           sendJson(ws, { type: "QueryResult", success: false, error: formatError(error) })
         }
       }

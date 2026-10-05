@@ -183,3 +183,34 @@ describe("streamHub: one stream per (database, model)", () => {
     expect(hub.size()).toBe(0)
   })
 })
+
+describe("streamHub: one open per slot", () => {
+  it("concurrent subscribes on a cold slot open exactly ONE stream, closed by the last unsubscribe", async () => {
+    // Without the shared in-flight open, each caller opened its own stream and the last
+    // assignment won: the rest stayed open forever, listeners attached, unreachable by unsubscribe.
+    const { hub, opened } = setup()
+    const unsubs = await Promise.all([1, 2, 3].map(() => hub.subscribe(DB1, "orders", undefined, vi.fn())))
+    expect(opened.orders).toHaveLength(1)
+    for (const u of unsubs) await u()
+    expect(opened.orders[0].closed).toBe(true)
+  })
+
+  it("closes a stream that lands after its last subscriber left", async () => {
+    const { factory, opened } = makeFakeStreamFactory()
+    let release: (() => void) | undefined
+    let opens = 0
+    const hub = createStreamHub({
+      reconnectDelayMs: 0,
+      openStream: (_dbName, model) =>
+        opens++ === 0
+          ? Promise.resolve(factory(model))
+          : new Promise((res) => (release = () => res(factory(model)))),
+    })
+    const unsub = await hub.subscribe(DB1, "orders", undefined, vi.fn())
+    opened.orders[0].emitError(new Error("boom")) // reconnect starts a second, slow open
+    await vi.waitFor(() => expect(release).toBeDefined())
+    await unsub()
+    release!()
+    await vi.waitFor(() => expect(opened.orders[1]?.closed).toBe(true))
+  })
+})

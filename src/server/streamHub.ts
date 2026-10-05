@@ -58,6 +58,7 @@ type Subscriber = {
 
 type Slot = {
   stream: Awaited<ReturnType<StreamHubOptions["openStream"]>> | null
+  opening?: Promise<void>
   subs: Set<Subscriber>
   reconnecting: boolean
 }
@@ -73,9 +74,24 @@ export function createStreamHub(opts: StreamHubOptions): StreamHub {
   const { openStream, reconnectDelayMs = 1000 } = opts
   const slots = new Map<string, Slot>()
 
-  async function ensureStream(dbName: string, model: string, slot: Slot): Promise<void> {
-    if (slot.stream) return
-    const stream = await openStream(dbName, model)
+  function ensureStream(dbName: string, model: string, slot: Slot): Promise<void> {
+    if (slot.stream) return Promise.resolve()
+    // Concurrent callers share ONE open. Without it each opened its own stream, the last
+    // assignment won, and the rest leaked forever with their listeners still attached.
+    slot.opening ??= openStream(dbName, model)
+      .then((stream) => attach(dbName, model, slot, stream))
+      .finally(() => {
+        slot.opening = undefined
+      })
+    return slot.opening
+  }
+
+  function attach(dbName: string, model: string, slot: Slot, stream: NonNullable<Slot["stream"]>) {
+    // Every subscriber left while it was opening: the slot is gone, so nobody else would close it.
+    if (slot.subs.size === 0) {
+      stream.close().catch(() => {})
+      return
+    }
     slot.stream = stream
     stream.on("change", (change: any) => {
       const type = (change.operationType || "update") as StreamHubChangeType
@@ -155,6 +171,7 @@ export function createStreamHub(opts: StreamHubOptions): StreamHub {
     },
     async shutdown() {
       for (const [, slot] of slots) {
+        slot.subs.clear() // an open still in flight closes itself on landing
         try { await slot.stream?.close() } catch {}
       }
       slots.clear()
