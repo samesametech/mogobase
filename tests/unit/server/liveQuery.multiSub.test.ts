@@ -835,3 +835,26 @@ describe("many subscriptions: review round F15", () => {
     await h.live.close("s")
   })
 })
+
+describe("paginated-query without paginationOpts", () => {
+  // Re-runs and loads always hand a paginated handler a paginationOpts object, the first run
+  // handed it the client's args as sent. A client that sent none was refused by a handler
+  // declaring paginationOpts (zod 4.4+ requires a `v.any()` key too) on its first run only.
+  it("the first run gets paginationOpts {}, as re-runs and loads do", async () => {
+    const seen: unknown[] = []
+    query("nopo.page", {
+      args: v.object({ model: v.string(), paginationOpts: v.object({ limit: v.number().optional() }) }),
+      handler: async ({ model, paginationOpts }, ctx) => {
+        ctx.watch(model)
+        seen.push(paginationOpts)
+        return { results: [{ _id: 1 }], hasNext: false, hasPrevious: false }
+      },
+    })
+    const h = harness()
+    h.live.handle("s", { type: "paginated-query", sid: "n", name: "nopo.page", args: { model: "nopo" } })
+    await vi.waitFor(() => expect(h.frames("n")).toHaveLength(1))
+    expect(h.frames("n")[0]).toMatchObject({ type: "PaginatedQueryResult", success: true })
+    expect(seen[0]).toEqual({})
+    await h.live.close("s")
+  })
+})

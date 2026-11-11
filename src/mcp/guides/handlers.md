@@ -304,7 +304,7 @@ const Pager: { find: (col: any, params: any) => Promise<any> } =
   isServer() ? (MongoPaging as any) : MongoPagingPolyfill
 
 query("listPosts", {
-  args: v.object({ filter: v.any(), paginationOpts: PaginationQueryArgs }),
+  args: v.object({ filter: v.any().optional(), paginationOpts: PaginationQueryArgs }),
   handler: async ({ filter, paginationOpts }, { db, watch }) => {
     watch("posts")
     return Pager.find(db.model("posts"), {

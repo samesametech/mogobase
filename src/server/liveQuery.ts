@@ -1219,7 +1219,13 @@ export function createLiveQueries(opts: LiveQueryOptions): LiveQueries {
           hasNext: false,
         }
         subscribe(s, slot, sub)
-        enqueue(s, slot, () => startPaged(s, slot, sub, args))
+        // The first run hands the handler a paginationOpts, as re-runs and loads do: without one,
+        // a handler declaring it (zod 4.4+ requires even a `v.any()` key) refused the first run only.
+        const firstArgs =
+          args == null ? { paginationOpts: {} }
+          : typeof args === "object" && !Array.isArray(args) && args.paginationOpts === undefined ? { ...args, paginationOpts: {} }
+          : args
+        enqueue(s, slot, () => startPaged(s, slot, sub, firstArgs))
         return true
       }
       // paginated-query-load-next / -previous (every other type was answered above): the

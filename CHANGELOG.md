@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.0.1
+
+### Security
+
+Dependency floors raised to their patched versions: `zod ^4.6.6` (GHSA-mrhx-c7xc-m3w5: memory exhaustion while validating handler args), `hono ^4.13.11`, `@hono/node-server ^1.19.15`, `@modelcontextprotocol/sdk ^1.32.0` (which brings fixed `express`, `body-parser`, `proxy-addr`, `qs`, `fast-uri` and `ip-address`), `ws ^8.21.0` and `tsx ^4.22.0` (esbuild 0.28). The lockfile takes the patched development tools too. `@hono/node-server` 1.x keeps GHSA-rmxm-3fg6-px4f (fixed only in 2.1.3, which `@hono/node-ws` does not accept yet): it is in `serveStatic`, which mogobase never calls.
+
+### Changed
+
+- **Zod 4.4+: an object key declared `v.any()` or `v.unknown()` is required.** A request leaving it out gets `Invalid args: <key>: Invalid input: expected nonoptional, received undefined`. Fix: `.optional()` on each key a caller may leave out. A fresh 4.0.0 install already resolved zod 4.4+. Upgrading guide: Z1.
+
+### Fixed
+
+- A paginated live query's first run gets a `paginationOpts` object (`{}` when the client sent none), as its re-runs and loads always did. A handler declaring `paginationOpts` refused the first run only.
+
 ## 4.0.0
 
 A major release, centred on four things:

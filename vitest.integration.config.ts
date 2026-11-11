@@ -12,6 +12,8 @@ export default defineConfig({
     hookTimeout: 60_000,
     globalSetup: ["tests/setup/integrationGlobalSetup.ts"],
     pool: "forks",
-    poolOptions: { forks: { singleFork: true } },
+    // One file at a time against the shared replica set; each file in a fresh fork (vitest 4
+    // dropped poolOptions.forks.singleFork).
+    maxWorkers: 1,
   },
 })

@@ -3,6 +3,15 @@
 What changes between major versions, and how to find and fix each change in an app. Written to be
 followed step by step by the app's AI agent.
 
+## 4.0.0 → 4.0.1: zod 4.6.6 or newer
+
+mogobase's `v` is its own `zod/v4`, and its floor is now `zod ^4.6.6` (security: GHSA-mrhx-c7xc-m3w5, memory exhaustion while validating an oversized constrained collection, reachable through any handler's args). A fresh install of 4.0.0 already resolved zod 4.4 or newer, so this can apply to 4.0.0 too. Upgrade with `npm i mogobase@^4.0.1`.
+
+**Z1. An object key declared `v.any()` or `v.unknown()` is required** (zod 4.4+). A request that leaves it out is refused with `Invalid args: <key>: Invalid input: expected nonoptional, received undefined`. Before, a missing key passed as `undefined`. A paginated live query's first run now always gets a `paginationOpts` object, as its re-runs and loads did, so `paginationOpts: v.any()` keeps working over the WebSocket. Over HTTP the handler gets what the client sent.
+- Find: `rg -n '\b(v|z)\.(any|unknown)\(\)' mogobase/ | rg -v 'optional|nullish|default'`; keep the matches that are keys of an `args` object.
+- Fix: add `.optional()` to each key a caller may leave out: `filter: v.any().optional()`.
+- Verify: no `expected nonoptional, received undefined` in answers or in the log.
+
 ## 3.x → 4.0.0
 
 ### Workflow (for an AI agent upgrading an app)

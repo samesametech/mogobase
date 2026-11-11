@@ -18,7 +18,7 @@ The build output is published as ESM (`"type": "module"`, `exports` map). Source
 - `npm start` — `node lib/server/start.js` (Node runtime).
 - `npm run cf-typegen` — regenerate `CloudflareBindings` types from `wrangler.jsonc`.
 
-- `npm test` — unit then integration tests (vitest). `npm run test:unit` (`vitest.unit.config.ts`, `tests/unit/**`, no database) and `npm run test:integration` (`vitest.integration.config.ts`, `tests/integration/**`, against a real single-node replica set started by `mongodb-memory-server` in `tests/setup/integrationGlobalSetup.ts`, so change streams work; files run in one fork, sequentially). `npm run test:watch` watches the unit suite. A fix comes with a test that fails without it.
+- `npm test` — unit then integration tests (vitest). `npm run test:unit` (`vitest.unit.config.ts`, `tests/unit/**`, no database) and `npm run test:integration` (`vitest.integration.config.ts`, `tests/integration/**`, against a real single-node replica set started by `mongodb-memory-server` in `tests/setup/integrationGlobalSetup.ts`, so change streams work; files run one at a time, `maxWorkers: 1`, each in a fresh fork). `npm run test:watch` watches the unit suite. A fix comes with a test that fails without it.
 
 There is no linter or CI configured. Do not add CI/lint tooling without being asked.
 
