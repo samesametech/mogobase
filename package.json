@@ -64,6 +64,7 @@
     "src/client/hooks",
     "src/client/api",
     "src/client/server.ts",
+    "CHANGELOG.md",
     "package.json"
   ],
   "peerDependencies": {

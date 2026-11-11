@@ -13,6 +13,8 @@ Source: [github.com/samesametech/mogobase](https://github.com/samesametech/mogob
 - **MongoDB-native** — thin wrapper around the official driver; no ORM, no schema lock-in.
 - **MCP server** — ships a Model Context Protocol server (`mogobase mcp`) that teaches AI assistants how to scaffold and extend a mogobase project.
 
+> **Upgrading from 3.x?** 4.0.0 is a major release. Read [CHANGELOG.md](./CHANGELOG.md) — every breaking change with its one-line fix — or have your AI assistant run the `upgrade-mogobase` MCP prompt, which walks the `mogobase://guide/upgrading` guide through your app (how to find each change, the fix, the log lines to check). Do not re-run `npx mogobase install` to refresh templates: it overwrites customised files.
+
 ## Install
 
 ```bash
@@ -531,10 +533,15 @@ Guides are served as `mogobase://guide/<slug>` (markdown). Clients can read them
 | `mogobase://guide/offline-backends` | RxDB vs WatermelonDB — when to pick each, caveats, interface. |
 | `mogobase://guide/sync` | Local-first sync mode: enabling, wire protocol, `updatedAt` semantics, conflict resolution, soft-delete propagation, known limitations. |
 | `mogobase://guide/troubleshooting` | Common errors: WS not connecting, handlers not registering, offline gotchas. |
+| `mogobase://guide/scaling` | Shared change streams, debounce, backpressure, pool sizing, capacity, one socket per tab. |
+| `mogobase://guide/configuration` | Every option, environment variable and default, and how to choose values for a project. |
+| `mogobase://guide/protocol` | Every `/ws` message and frame: live queries, many subscriptions per socket (`sid`), `unsubscribe`, sync. |
+| `mogobase://guide/upgrading` | Every breaking change between major versions (3.x → 4.0.0): how to find it in an app, the fix, the log lines to check. |
 
 ### Prompts
 
 - `setup-mogobase` — seeds the assistant with the correct onboarding workflow: run `mogobase_check_setup`, read the overview + setup guides, propose changes, ask before running `mogobase_install`.
+- `upgrade-mogobase` — walks the assistant through a major upgrade: read `mogobase://guide/upgrading`, find each breaking change in the app, fix it, check the log, propose options; never re-run `mogobase_install` over customised files.
 
 ## License
 

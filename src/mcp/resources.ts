@@ -18,6 +18,11 @@ const GUIDES: Guide[] = [
   { slug: "scaling", title: "Scaling and Performance", description: "Shared change-stream hub, refetch debounce, backpressure, capacity ceilings." },
   { slug: "configuration", title: "Configuration Reference", description: "Every option, environment variable and default, and how to choose values for a project." },
   { slug: "protocol", title: "WebSocket Protocol", description: "Every /ws message and frame: live queries, many subscriptions per socket (sid), unsubscribe, sync." },
+  {
+    slug: "upgrading",
+    title: "Upgrading mogobase",
+    description: "Every breaking change between major versions (3.x → 4.0.0): how to find it in an app, the fix, and the log lines to check.",
+  },
 ]
 
 function guidesDir(): string {
