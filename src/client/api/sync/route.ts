@@ -17,18 +17,21 @@
 // See: defineModel(name, schema, { sync: { fields: [...] } }) for the
 // field-level allowlist that complements this policy.
 
-import { pullChanges, pushChanges, type SyncPolicy } from "mogobase/server/sync"
+import { evaluateSyncPolicy, pullChanges, pushChanges, type HeaderView, type SyncPolicy } from "mogobase/server/sync"
 
 export const dynamic = "force-dynamic"
 
 // Replace with your auth integration (better-auth, NextAuth, custom, etc.).
 // Returning null/undefined for an unauthenticated request will deny all sync ops.
-async function getSession(_headers: Headers): Promise<{ userId: string } | null> {
+// `headers` is a HeaderView — the same object over HTTP and the WebSocket: read it as
+// headers["cookie"] or headers.get("cookie"). It is a real Fetch Headers (a copy), so an auth
+// library that wants one (an `instanceof Headers` check, `new Request(url, { headers })`) takes it.
+async function getSession(_headers: HeaderView): Promise<{ userId: string } | null> {
   return null
 }
 
 const syncPolicy: SyncPolicy = async ({ model, headers }) => {
-  const session = await getSession(headers as any)
+  const session = await getSession(headers)
   if (!session) return { allow: false }
 
   // Tune per-model. Default-deny: every model that should sync goes here.
@@ -60,7 +63,9 @@ export async function POST(request: Request) {
 
   try {
     if (action === "pull") {
-      const decision = await syncPolicy({ op: "pull", model: body.model, headers: request.headers })
+      // Asked as over the WebSocket (evaluateSyncPolicy): the same headers shape (plain keys and
+      // .get()), and a policy that throws is a logged 403, not its error text sent to the client.
+      const decision = await evaluateSyncPolicy(syncPolicy, "pull", body.model, request.headers)
       if (!decision.allow) return new Response("Forbidden", { status: 403 })
       const rs = await pullChanges({
         model: body.model,
@@ -71,7 +76,7 @@ export async function POST(request: Request) {
       return Response.json(rs)
     }
     if (action === "push") {
-      const decision = await syncPolicy({ op: "push", model: body.model, headers: request.headers })
+      const decision = await evaluateSyncPolicy(syncPolicy, "push", body.model, request.headers)
       if (!decision.allow) return new Response("Forbidden", { status: 403 })
       const rs = await pushChanges({
         model: body.model,

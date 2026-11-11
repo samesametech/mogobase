@@ -17,6 +17,8 @@
 // Cursor tokens are base64url(JSON.stringify(value)) — opaque, with a stable
 // shape (`_id` cursor → encoded value; non-`_id` cursor → `[fieldValue, _id]`).
 
+import { compareDecimalStrings } from "./filterMatcher"
+
 export type PagingParams = {
   query?: any
   paginatedField?: string
@@ -38,6 +40,12 @@ export type PagingResult<T = any> = {
 
 type FindableCollection<T = any> = {
   find: (filter: any) => { toArray: () => Promise<T[]> }
+  /**
+   * The model's v.decimal128() fields (both offline adapters expose them): a paginatedField among
+   * them is ordered and paged by value — its decimal strings as text put "9.00" above "100.00",
+   * unlike the server's Decimal128 order.
+   */
+  decimalFields?: ReadonlySet<string>
 }
 
 function urlSafeBase64Encode(s: string): string {
@@ -124,6 +132,8 @@ async function find<T = any>(
   const sortCI = !!params.sortCaseInsensitive
 
   const all: any[] = (await col.find(params.query || {}).toArray()) as any[]
+  const byValue = col.decimalFields?.has(paginatedField) === true
+  const compareField = (a: any, b: any): number => (byValue ? compareDecimalStrings(a, b) : undefined) ?? compareValues(a, b)
 
   all.sort((a, b) => {
     if (paginatedField === "_id") {
@@ -135,7 +145,7 @@ async function find<T = any>(
       if (typeof av === "string") av = av.toLowerCase()
       if (typeof bv === "string") bv = bv.toLowerCase()
     }
-    const primary = compareValues(av, bv)
+    const primary = compareField(av, bv)
     if (primary !== 0) return primary * dir
     return compareValues(a._id, b._id) * dir
   })
@@ -152,7 +162,7 @@ async function find<T = any>(
         const [fieldValue, idValue] = Array.isArray(decoded) ? decoded : [decoded, undefined]
         let dv = valueOf(doc, paginatedField)
         if (sortCI && typeof dv === "string") dv = dv.toLowerCase()
-        const primary = compareValues(dv, fieldValue) * dir
+        const primary = compareField(dv, fieldValue) * dir
         if (primary !== 0) return primary > 0
         if (idValue === undefined) return false
         return compareValues(doc._id, idValue) * dir > 0

@@ -121,6 +121,7 @@
     "@types/react": "^19.2.8",
     "@types/ws": "^8.18.1",
     "@vitest/ui": "^1.6.1",
+    "fake-indexeddb": "^6.2.8",
     "mongo-cursor-pagination": "^9.1.1",
     "mongodb": "^6.21.0",
     "mongodb-memory-server": "^9.5.0",

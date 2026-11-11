@@ -96,6 +96,16 @@ describe("autoStamp Decimal128 — write encode", () => {
     expect(inserted.name).toBe("x")
   })
 
+  it("leaves the caller's decimal strings as strings while stamping its object", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    const doc: any = { _id: "1", amount: "100.14", fee: { rate: "0.0035" }, name: "x" }
+    await wrapped.model("dec_widgets").insertOne(doc)
+    expect(doc.amount).toBe("100.14")
+    expect(doc.fee.rate).toBe("0.0035")
+    expect(typeof doc.createdAt).toBe("number")
+  })
+
   it("encodes $set decimal values on updateOne", async () => {
     const db = makeFakeDb()
     const wrapped = wrapDbWithAutoStamp(db as any)

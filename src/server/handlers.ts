@@ -28,6 +28,19 @@ function requireDbSingleton(method: string): MogobaseDB {
 export type WatchOptions = ChangeStreamOptions & {
   paginatedField?: string
   sortAscending?: boolean
+  /**
+   * Don't re-run for an update that changed only these fields (or fields under them) —
+   * e.g. a cron stamping `reconciledAt` on rows the query shows but does not display.
+   * `updatedAt` joins the list automatically, since every write stamps it. Inserts,
+   * deletes always re-run; a replace made through ctx.db usually arrives as an update (its changed fields checked), a `replace` event always re-runs. Omitted: every matching change re-runs, as before.
+   */
+  ignoreFields?: string[]
+  /**
+   * The database to watch, when it is not the one the request resolved to — the database the
+   * handler read with `ctx.useDatabase(name)`. Without it a watch follows the request's
+   * database, or the transport's `watchDatabaseFor`, or the model's one declared home.
+   */
+  dbName?: string
 }
 
 export type Context = {
@@ -74,6 +87,53 @@ export type MutationHandler = {
   ) => Promise<any>
 }
 
+/** One way a handler's args failed validation, as the thrown error carries it. */
+export type ArgsIssue = {
+  /** Where in the args: `["customer", "email"]`, `["items", 0, "price"]`; `[]` for the args as a whole. */
+  path: (string | number)[]
+  /** zod's issue code: `"invalid_type"`, `"too_small"`, `"unrecognized_keys"`, … */
+  code: string
+  /** zod's message, without the path. */
+  message: string
+}
+
+/** What a handler throws when its args fail validation: an `Error` with the issues on it. */
+export type InvalidArgsError = Error & { issues: ArgsIssue[] }
+
+/**
+ * `Invalid args: customer.email: Invalid input: expected string, received undefined`
+ *
+ * This used to keep only the first issue's message, so a client was told what
+ * was wrong but never which field, and an app could not tell a missing field
+ * from a malformed one. Every issue is now named by its path, the first one
+ * first, so code matching the `Invalid args: ` prefix still works; an issue with
+ * the args as a whole has no path and reads exactly as before. The same issues
+ * ride on the error as `issues`, for an app that maps them to its own error
+ * codes instead of parsing the text.
+ *
+ * A plain `Error` on purpose: the HTTP route template answers with `${error}`,
+ * and a custom `name` would change that body's `Error: Invalid args: ` prefix.
+ */
+const MAX_LISTED_ISSUES = 10
+
+function invalidArgs(
+  zodIssues: readonly { path: PropertyKey[]; code: string; message: string }[]
+): InvalidArgsError {
+  const issues: ArgsIssue[] = zodIssues.map((i) => ({
+    path: i.path.map((key) => (typeof key === "symbol" ? String(key) : key)),
+    code: i.code,
+    message: i.message,
+  }))
+  // At most MAX_LISTED_ISSUES in the text: an array of 5,000 bad items would otherwise make a
+  // message of hundreds of KB, sent to the client and logged. Every issue stays on `issues`.
+  const listed = issues
+    .slice(0, MAX_LISTED_ISSUES)
+    .map((i) => (i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message))
+  const more = issues.length - listed.length
+  const text = listed.join("; ") + (more > 0 ? `; …and ${more} more` : "")
+  return Object.assign(new Error(`Invalid args: ${text}`), { issues })
+}
+
 const GLOBAL_KEY = "__mogobase_handlers__"
 type HandlersGlobal = { instance?: Handlers }
 const g = globalThis as unknown as Record<string, HandlersGlobal>
@@ -108,67 +168,33 @@ class Handlers {
   // ctx.runQuery/ctx.runMutation calls (already inside an authorized handler)
   // and the explicit runInternalQuery/runInternalMutation entry points pass `true`.
   async _runQuery(name: string, args: any, ctx: Context = {}, allowInternal = false): Promise<any> {
-    let handler = this.queries.get(name)
-    if (!handler) {
-      if (allowInternal && name.startsWith("internal")) {
-        handler = this._queries.get(name)
-      }
-      if (!handler) throw new Error(`Query ${name} not found`)
-    }
-    if (!ctx.db) throw new Error("ctx.db is required — pass the mogobase/db or mogobase/client-db instance")
-    // Run the per-request DB resolver once at the entry boundary. Recursive
-    // ctx.runQuery / ctx.runMutation calls set _resolved: true and skip this.
-    const dbSingleton = getDbSingleton()
-    if (!ctx._resolved && dbSingleton && ctx.db === dbSingleton) {
-      const active = await (dbSingleton as any)._resolveActive(ctx.headers)
-      ctx = { ...ctx, db: active, _resolved: true }
-    }
-    const validated = await handler.args.safeParseAsync(args ?? {})
-    if (validated.success) {
-      const activeDb = ctx.db
-      // Wrap for the read-decode side of the autoStamp codec — decimal128
-      // fields need `Decimal128 → string` on every cursor result, including
-      // query paths. Write-stamping branches inside the wrapper are gated by
-      // the write op name and are dead code on a read-only handler.
-      const wrappedDb = wrapDbWithAutoStamp(activeDb)
-      // Memoize wrapped views per-call: the underlying useDatabase(name) is
-      // already cached on the singleton, but each wrapDbWithAutoStamp produces
-      // a fresh Proxy, so repeat calls to ctx.useDatabase(name) must reuse the
-      // same wrapped instance to preserve identity for handler-side caching.
-      const useDatabaseCache = new Map<string, MogobaseDB>()
-      const useDatabase = (dbName: string) => {
-        let cached = useDatabaseCache.get(dbName)
-        if (!cached) {
-          cached = wrapDbWithAutoStamp(requireDbSingleton("useDatabase").useDatabase(dbName)) as MogobaseDB
-          useDatabaseCache.set(dbName, cached)
-        }
-        return cached
-      }
-      return await handler.handler(validated.data, {
-        headers: ctx.headers || null,
-        db: wrappedDb,
-        runQuery: (n, a, c) =>
-          this._runQuery(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }, true),
-        runMutation: (n, a, c) =>
-          this._runMutation(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }, true),
-        watch: ctx.watch || (() => {}),
-        useDatabase,
-        useRawDatabase: (alias: string) => requireDbSingleton("useRawDatabase").useRawDatabase(alias),
-      })
-    } else {
-      throw new Error(`Invalid args: ${validated.error.issues[0].message}`)
-    }
+    const { handler, data, ctx: resolved } = await this._prepareRun("Query", this.queries, this._queries, name, args, ctx, allowInternal)
+    return await handler.handler(data, { ...this._handlerCtx(resolved), watch: resolved.watch || (() => {}) })
   }
 
   // See `_runQuery` for the `allowInternal` rationale — same trust boundary.
   async _runMutation(name: string, args: any, ctx: Context = {}, allowInternal = false): Promise<any> {
-    let handler = this.mutations.get(name)
-    if (!handler) {
-      if (allowInternal && name.startsWith("internal")) {
-        handler = this._mutations.get(name)
-      }
-      if (!handler) throw new Error(`Mutation ${name} not found`)
-    }
+    const { handler, data, ctx: resolved } = await this._prepareRun("Mutation", this.mutations, this._mutations, name, args, ctx, allowInternal)
+    return await handler.handler(data, this._handlerCtx(resolved))
+  }
+
+  // What _runQuery and _runMutation do alike before the handler runs — one copy, so a fix to one
+  // (the resolver, validation) reaches the other: find the handler (internal ones only for a
+  // nested call), require a db, run the per-request DB resolver once at the entry boundary
+  // (recursive ctx.runQuery / ctx.runMutation calls set _resolved: true and skip it), validate
+  // the args.
+  async _prepareRun(
+    kind: "Query" | "Mutation",
+    pool: Map<string, any>,
+    internalPool: Map<string, any>,
+    name: string,
+    args: any,
+    ctx: Context,
+    allowInternal: boolean
+  ): Promise<{ handler: any; data: any; ctx: Context }> {
+    let handler = pool.get(name)
+    if (!handler && allowInternal && name.startsWith("internal")) handler = internalPool.get(name)
+    if (!handler) throw new Error(`${kind} ${name} not found`)
     if (!ctx.db) throw new Error("ctx.db is required — pass the mogobase/db or mogobase/client-db instance")
     const dbSingleton = getDbSingleton()
     if (!ctx._resolved && dbSingleton && ctx.db === dbSingleton) {
@@ -176,30 +202,32 @@ class Handlers {
       ctx = { ...ctx, db: active, _resolved: true }
     }
     const validated = await handler.args.safeParseAsync(args ?? {})
-    if (validated.success) {
-      const activeDb = ctx.db
-      const wrappedDb = wrapDbWithAutoStamp(activeDb)
-      const useDatabaseCache = new Map<string, MogobaseDB>()
-      const useDatabase = (dbName: string) => {
-        let cached = useDatabaseCache.get(dbName)
-        if (!cached) {
-          cached = wrapDbWithAutoStamp(requireDbSingleton("useDatabase").useDatabase(dbName)) as MogobaseDB
-          useDatabaseCache.set(dbName, cached)
-        }
-        return cached
-      }
-      return await handler.handler(validated.data, {
-        headers: ctx.headers || null,
-        db: wrappedDb,
-        runQuery: (n, a, c) =>
-          this._runQuery(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }, true),
-        runMutation: (n, a, c) =>
-          this._runMutation(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }, true),
-        useDatabase,
-        useRawDatabase: (alias: string) => requireDbSingleton("useRawDatabase").useRawDatabase(alias),
-      })
-    } else {
-      throw new Error(`Invalid args: ${validated.error.issues[0].message}`)
+    if (!validated.success) throw invalidArgs(validated.error.issues)
+    return { handler, data: validated.data, ctx }
+  }
+
+  // The ctx a handler gets, query or mutation (a query's adds `watch`). `db` wrapped for the
+  // autoStamp codec — on a query too: decimal128 fields need `Decimal128 → string` on every
+  // cursor result, and the write-stamping branches are dead code on a read-only handler.
+  _handlerCtx(ctx: Context) {
+    const activeDb = ctx.db
+    return {
+      headers: ctx.headers || null,
+      db: wrapDbWithAutoStamp(activeDb),
+      // A nested query's watches belong to this run: without `watch` they were dropped, and a
+      // live query never re-ran on a write to a collection only the nested query watched. Run
+      // against another database (`c.db`), they watch that one. (A mutation's ctx has no watch.)
+      runQuery: (n: string, a?: any, c?: Partial<Context>) =>
+        this._runQuery(
+          n,
+          a,
+          { db: activeDb, headers: ctx.headers, _resolved: true, watch: nestedWatch(ctx.watch, c?.db, activeDb), ...(c || {}) },
+          true
+        ),
+      runMutation: (n: string, a?: any, c?: Partial<Context>) =>
+        this._runMutation(n, a, { db: activeDb, headers: ctx.headers, _resolved: true, ...(c || {}) }, true),
+      useDatabase: memoizedUseDatabase(),
+      useRawDatabase,
     }
   }
 }
@@ -219,16 +247,19 @@ export function mutation(name: string, c: MutationHandler) {
   Handlers._instance.mutations.set(name, c)
 }
 
+// The check used to look up the bare name in a map keyed `internal.<name>`, so it never fired and
+// a second registration silently replaced the first. It is reported now, and still replaces: a
+// throw (what query()/mutation() do) would stop an app that has one from booting.
 export function internalQuery(name: string, c: QueryHandler) {
-  if (Handlers._instance._queries.has(name)) {
-    throw new Error(`Handler ${name} already exists`)
+  if (Handlers._instance._queries.has(`internal.${name}`)) {
+    console.warn(`[mogobase] internalQuery "${name}" is registered twice: the later registration replaces the earlier one. Rename one of them.`)
   }
   Handlers._instance._queries.set(`internal.${name}`, c)
 }
 
 export function internalMutation(name: string, c: MutationHandler) {
-  if (Handlers._instance._mutations.has(name)) {
-    throw new Error(`Handler ${name} already exists`)
+  if (Handlers._instance._mutations.has(`internal.${name}`)) {
+    console.warn(`[mogobase] internalMutation "${name}" is registered twice: the later registration replaces the earlier one. Rename one of them.`)
   }
   Handlers._instance._mutations.set(`internal.${name}`, c)
 }
@@ -269,3 +300,44 @@ export async function runInternalMutation(name: string, args: any, ctx: Context 
 }
 
 export default _singleton
+
+/**
+ * The caller's `watch`, for a query it runs through ctx.runQuery. That watch places a watch in the
+ * caller's database; a nested query given a db of its own (`{ db: ctx.useDatabase("identity") }`)
+ * reads another one, so its watches are sent there — the watch's own `dbName` still wins.
+ */
+function nestedWatch(watch: Context["watch"], db: any, callerDb: any): Context["watch"] {
+  if (!watch || !db || db === callerDb) return watch
+  const dbName = databaseNameOf(db)
+  // The caller's own database (ctx.db is its autoStamp wrapper, not the same object): passed on as
+  // it is, so a model's declared home still decides where it is watched.
+  if (!dbName || dbName === databaseNameOf(callerDb)) return watch
+  return (model: string, filter?: any, options?: any) =>
+    watch(model, filter, { ...(options || {}), dbName: options?.dbName ?? dbName })
+}
+
+function databaseNameOf(db: any): string | undefined {
+  try {
+    return db?.db?.databaseName
+  } catch {
+    return undefined // not connected yet
+  }
+}
+
+// ctx.useDatabase for one handler call — one copy for queries and mutations. Memoized per call:
+// the underlying useDatabase(name) is cached on the singleton, but each wrapDbWithAutoStamp makes
+// a fresh Proxy, so repeat calls must reuse the same wrapped instance to preserve identity for
+// handler-side caching.
+function memoizedUseDatabase(): (dbName: string) => MogobaseDB {
+  const cache = new Map<string, MogobaseDB>()
+  return (dbName: string) => {
+    let cached = cache.get(dbName)
+    if (!cached) {
+      cached = wrapDbWithAutoStamp(requireDbSingleton("useDatabase").useDatabase(dbName)) as MogobaseDB
+      cache.set(dbName, cached)
+    }
+    return cached
+  }
+}
+
+const useRawDatabase = (alias: string) => requireDbSingleton("useRawDatabase").useRawDatabase(alias)

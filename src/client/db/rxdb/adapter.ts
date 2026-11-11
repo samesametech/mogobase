@@ -144,7 +144,15 @@ class FindCursor {
 }
 
 export class RxMongoAdapter {
-  constructor(public _rx: RxCollection, public name: string) {}
+  constructor(
+    public _rx: RxCollection,
+    public name: string,
+    /**
+     * The model's v.decimal128() fields: the paging polyfill orders a paginatedField among them by
+     * value. (Filters are RxDB's own query engine, which compares their decimal strings as text.)
+     */
+    public readonly decimalFields: ReadonlySet<string> = new Set()
+  ) {}
 
   find(filter: MongoFilter = {}) {
     return new FindCursor(this._rx, filter)

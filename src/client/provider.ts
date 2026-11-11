@@ -86,10 +86,7 @@ export function MogobaseProvider(props: MogobaseProviderProps): React.ReactEleme
       await clientDB.connect(dbName)
       if (handlers) await handlers()
       // Apply any models registered via runtime.defineModel() in handler files.
-      const { getModels, indexEnvelope } = await import("../runtime/models")
-      for (const m of getModels()) {
-        await clientDB.defineModel(m.name, m.schema, indexEnvelope(m))
-      }
+      await defineRegisteredModels(clientDB)
       if (cancelled) return
       setResolvedDB(clientDB)
       setReady(true)
@@ -136,3 +133,17 @@ export function MogobaseProvider(props: MogobaseProviderProps): React.ReactEleme
 }
 
 export default MogobaseProvider
+
+/**
+ * Define every model registered through runtime.defineModel() on the client DB — once each, from
+ * its merged definition (latestModelDefs: each field from the latest definition that set it, a
+ * definition without a schema keeping the earlier one's), as the server builds it. Every raw
+ * definition used to be replayed, so a later one without a schema (a file that only opts the
+ * model into sync) gave the client a timestamps-only schema and dropped its decimal fields.
+ */
+export async function defineRegisteredModels(clientDB: Pick<MogobaseClientDB, "defineModel">): Promise<void> {
+  const { latestModelDefs, indexEnvelope } = await import("../runtime/models")
+  for (const m of latestModelDefs()) {
+    await clientDB.defineModel(m.name, m.schema, indexEnvelope(m))
+  }
+}

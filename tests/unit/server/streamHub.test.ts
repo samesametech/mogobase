@@ -214,3 +214,73 @@ describe("streamHub: one open per slot", () => {
     await vi.waitFor(() => expect(opened.orders[1]?.closed).toBe(true))
   })
 })
+
+describe("streamHub: ignoreFields", () => {
+  it("skips, for that subscriber only, an update that changed only ignored fields", async () => {
+    const { hub, opened } = setup()
+    const ignoring = vi.fn()
+    const plain = vi.fn()
+    await hub.subscribe(DB1, "orders", { "fullDocument.org": "a" }, ignoring, { ignoreFields: ["reconciledAt", "updatedAt"] })
+    await hub.subscribe(DB1, "orders", { "fullDocument.org": "a" }, plain)
+    const stamp = {
+      operationType: "update",
+      fullDocument: { _id: 1, org: "a" },
+      documentKey: { _id: 1 },
+      updateDescription: { updatedFields: { reconciledAt: 5, updatedAt: 5 }, removedFields: [] },
+    }
+    opened.orders[0].emit("change", stamp)
+    expect(ignoring).not.toHaveBeenCalled()
+    expect(plain).toHaveBeenCalledTimes(1)
+
+    opened.orders[0].emit("change", { ...stamp, updateDescription: { updatedFields: { status: "paid" }, removedFields: [] } })
+    expect(ignoring).toHaveBeenCalledTimes(1)
+    expect(plain).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("streamHub: ignoreFields cost (review round 10)", () => {
+  it("an update's changed paths are worked out once per change, not once per subscriber", async () => {
+    const { hub, opened } = setup()
+    for (let i = 0; i < 5; i++) await hub.subscribe(DB1, "orders", undefined, vi.fn(), { ignoreFields: ["reconciledAt"] })
+    let reads = 0
+    const change: any = { operationType: "update", fullDocument: { _id: 1 }, documentKey: { _id: 1 } }
+    Object.defineProperty(change, "updateDescription", {
+      get: () => (reads++, { updatedFields: { reconciledAt: 1 }, removedFields: [] }),
+    })
+    opened.orders[0].emit("change", change)
+    expect(reads).toBe(1)
+  })
+})
+
+describe("streamHub: review round 14", () => {
+  // matches() ran outside the try in the change listener: a filter that threw (a regex MongoDB
+  // accepts and JavaScript does not) skipped every later subscriber and threw back into the
+  // driver's emit — every live query and sync stream on the collection stopped updating.
+  it("a subscriber whose filter throws does not keep the others from hearing a change", async () => {
+    const { hub, opened } = setup()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const before = vi.fn()
+    const after = vi.fn()
+    await hub.subscribe(DB1, "orders", undefined, before)
+    // A filter whose evaluation throws (what a regex only MongoDB compiles did before round 14).
+    const throwing = { "fullDocument.x": { get $eq(): never { throw new SyntaxError("Invalid regular expression") } } }
+    await hub.subscribe(DB1, "orders", throwing as any, vi.fn())
+    await hub.subscribe(DB1, "orders", undefined, after)
+    expect(() => opened.orders[0].emitChange({ _id: "1" })).not.toThrow()
+    expect(before).toHaveBeenCalledTimes(1)
+    expect(after).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it("a $regex only MongoDB can run is refused at subscribe, so it never reaches the listener", async () => {
+    const { hub } = setup()
+    await expect(hub.subscribe(DB1, "orders", { "fullDocument.name": { $regex: "a b", $options: "x" } }, vi.fn())).rejects.toThrow(/unsupported/)
+  })
+})
+
+describe("streamHub: review round 19", () => {
+  it("refuses a filter it cannot run with that reason, even one holding a BigInt", async () => {
+    const { hub } = setup()
+    await expect(hub.subscribe(DB1, "orders", { "fullDocument.n": { $mod: [5n, 0] } } as any, vi.fn())).rejects.toThrow(/unsupported filter operator/)
+  })
+})

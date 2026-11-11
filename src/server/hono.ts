@@ -5,7 +5,7 @@ import handlers from "@/server/handlers"
 import DB from "@/db"
 import path from "path"
 import { config } from "dotenv"
-import { pullChanges, pushChanges, type SyncPolicy } from "@/server/sync"
+import { evaluateSyncPolicy, pullChanges, pushChanges, type SyncPolicy } from "@/server/sync"
 
 let syncPolicy: SyncPolicy | undefined
 
@@ -99,30 +99,25 @@ app.post("/api/sync", async (c: Context) => {
   } catch {
     return c.text("Invalid JSON", 400)
   }
+  // Asked as the WebSocket transports ask it (evaluateSyncPolicy): headers as a headerView, a
+  // throwing policy a logged 403.
   const headers = c.req.raw.headers
   try {
     if (action === "pull") {
-      let extraFilter: Record<string, any> | undefined
-      if (syncPolicy) {
-        const decision = await syncPolicy({ op: "pull", model: body.model, headers })
-        if (!decision.allow) return c.text("Forbidden", 403)
-        extraFilter = decision.filter
-      }
+      const decision = await evaluateSyncPolicy(syncPolicy, "pull", body.model, headers)
+      if (!decision.allow) return c.text("Forbidden", 403)
       const rs = await pullChanges({
         model: body.model,
         checkpoint: body.checkpoint ?? null,
         batchSize: body.batchSize,
-        extraFilter,
+        extraFilter: decision.filter,
       })
       return c.json(rs)
     }
     if (action === "push") {
-      let transform
-      if (syncPolicy) {
-        const decision = await syncPolicy({ op: "push", model: body.model, headers })
-        if (!decision.allow) return c.text("Forbidden", 403)
-        transform = decision.transform
-      }
+      const decision = await evaluateSyncPolicy(syncPolicy, "push", body.model, headers)
+      if (!decision.allow) return c.text("Forbidden", 403)
+      const transform = decision.transform
       const rs = await pushChanges({
         model: body.model,
         rows: body.rows || [],

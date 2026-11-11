@@ -130,6 +130,90 @@ describe("wrapDbWithAutoStamp", () => {
     await wrapped.model("widgets").findOne({ _id: "x" })
     expect(db.collection.findOne).toHaveBeenCalledWith({ _id: "x" })
   })
+
+  // ——— The caller's own document. The wrapper stores a stamped COPY, so the
+  // object a handler built and passed in used to keep no stamps and no _id, and
+  // every handler returning what it had just inserted shipped null timestamps.
+
+  it("insertOne writes the stored stamps and generated _id back onto the caller's object", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    const doc: any = { name: "a" }
+    await wrapped.model("widgets").insertOne(doc)
+    const stored = db.collection.insertOne.mock.calls[0][0]
+    expect(stored).not.toBe(doc)
+    expect(doc).toEqual({ name: "a", createdAt: now, updatedAt: now, deletedAt: null, _id: "x" })
+    // The stored copy is shaped as it always was: stamps first, no _id of ours.
+    expect(Object.keys(stored)).toEqual(["createdAt", "updatedAt", "deletedAt", "name"])
+  })
+
+  it("insertOne keeps a caller's own _id and timestamps", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    const doc: any = { _id: "mine", createdAt: 42 }
+    await wrapped.model("widgets").insertOne(doc)
+    expect(doc).toEqual({ _id: "mine", createdAt: 42, updatedAt: now, deletedAt: null })
+  })
+
+  it("insertMany writes back each row, with its _id by position", async () => {
+    const db = makeFakeDb()
+    db.collection.insertMany.mockResolvedValueOnce({ acknowledged: true, insertedIds: { 0: "own", 1: "gen" } })
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    const docs: any[] = [{ _id: "own", name: "a" }, { name: "b" }]
+    await wrapped.model("widgets").insertMany(docs)
+    expect(docs[0]).toEqual({ _id: "own", name: "a", createdAt: now, updatedAt: now, deletedAt: null })
+    expect(docs[1]).toEqual({ _id: "gen", name: "b", createdAt: now, updatedAt: now, deletedAt: null })
+  })
+
+  it("a failed insert leaves the caller's object as it was", async () => {
+    const db = makeFakeDb()
+    db.collection.insertOne.mockRejectedValueOnce(new Error("E11000 duplicate key"))
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    const doc: any = { name: "a" }
+    await expect(wrapped.model("widgets").insertOne(doc)).rejects.toThrow(/duplicate/)
+    expect(doc).toEqual({ name: "a" })
+  })
+
+  it("a frozen document still inserts, stamped in storage only", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    const doc = Object.freeze({ name: "a" })
+    await expect(wrapped.model("widgets").insertOne(doc)).resolves.toBeDefined()
+    expect(db.collection.insertOne.mock.calls[0][0].createdAt).toBe(now)
+    expect(doc).toEqual({ name: "a" })
+  })
+
+  // Re-inserting the same object: what mogobase wrote onto it is not the caller's own, so the
+  // second insert gets a fresh _id and fresh stamps — as every insert did before the write-back.
+  it("re-inserting the same object sends a fresh _id and fresh stamps, not the first insert's", async () => {
+    const db = makeFakeDb()
+    db.collection.insertOne
+      .mockResolvedValueOnce({ acknowledged: true, insertedId: "id1" })
+      .mockResolvedValueOnce({ acknowledged: true, insertedId: "id2" })
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    const row: any = { name: "a" }
+    await wrapped.model("widgets").insertOne(row)
+    vi.spyOn(Date, "now").mockReturnValue(now + 1000)
+    row.n = 2
+    await wrapped.model("widgets").insertOne(row)
+
+    const second = db.collection.insertOne.mock.calls[1][0]
+    expect("_id" in second).toBe(false)
+    expect(second).toEqual({ createdAt: now + 1000, updatedAt: now + 1000, deletedAt: null, name: "a", n: 2 })
+    expect(row).toMatchObject({ _id: "id2", createdAt: now + 1000, updatedAt: now + 1000 })
+  })
+
+  it("a value the caller sets after an insert is the caller's, and is kept", async () => {
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    const row: any = { name: "a" }
+    await wrapped.model("widgets").insertOne(row)
+    row._id = "mine"
+    row.createdAt = 5
+    await wrapped.model("widgets").insertOne(row)
+    expect(db.collection.insertOne.mock.calls[1][0]).toMatchObject({ _id: "mine", createdAt: 5 })
+    expect(row).toMatchObject({ _id: "mine", createdAt: 5 })
+  })
 })
 
 describe("wrapDbWithAutoStamp + dbValidation", () => {
@@ -313,6 +397,17 @@ describe("wrapDbWithAutoStamp + dbValidation", () => {
     await wrapped.model("dbVal_reads").findOne({ _id: "x" })
     expect(db.collection.findOne).toHaveBeenCalledWith({ _id: "x" })
   })
+
+  it("a refused insert leaves the caller's object as it was", async () => {
+    defineModel("dbVal_insertRefusedDoc", validatedSchema as any, { dbValidation: true })
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    const doc: any = { name: "a", qty: "three", userId: "u1" }
+    await expect(async () => {
+      await wrapped.model("dbVal_insertRefusedDoc").insertOne(doc)
+    }).rejects.toThrow(/Validation failed/)
+    expect(doc).toEqual({ name: "a", qty: "three", userId: "u1" })
+  })
 })
 
 describe("wrapDbWithAutoStamp + timeseries", () => {
@@ -333,6 +428,17 @@ describe("wrapDbWithAutoStamp + timeseries", () => {
     expect(inserted.createdAt).toBe(now)
     expect(inserted.updatedAt).toBe(now)
     expect("deletedAt" in inserted).toBe(false)
+  })
+
+  it("writes no deletedAt back onto a timeseries caller's object", async () => {
+    defineModel("ts_widgets_caller", undefined, { timeseries: { timeField: "ts" } })
+    const db = makeFakeDb()
+    const wrapped = wrapDbWithAutoStamp(db as any)
+    const doc: any = { ts: new Date(now), value: 1 }
+    await wrapped.model("ts_widgets_caller").insertOne(doc)
+    expect(doc.createdAt).toBe(now)
+    expect(doc.updatedAt).toBe(now)
+    expect("deletedAt" in doc).toBe(false)
   })
 
   it("stamps each row in timeseries insertMany without deletedAt", async () => {
@@ -411,13 +517,21 @@ describe("wrapDbWithAutoStamp + timeseries", () => {
     const db = makeFakeDb()
     const wrapped = wrapDbWithAutoStamp(db as any)
     await wrapped.model("widgets").replaceOne({ _id: "w1" }, { name: "b" })
-    const plain = db.collection.replaceOne.mock.calls[0][1]
+    // A non-upsert replace is an update pipeline that keeps the stored row's createdAt / deletedAt
+    // (round F8): the replacement itself carries a fresh updatedAt and no invented createdAt.
+    const pipeline = db.collection.updateOne.mock.calls[0][1]
+    const plain = pipeline[0].$replaceWith.$mergeObjects[1].$literal
     expect(plain.updatedAt).toBe(now)
     expect(plain.createdAt).toBeUndefined()
     await wrapped.model("widgets").replaceOne({ _id: "w2" }, { name: "c" }, { upsert: true })
-    const upserted = db.collection.replaceOne.mock.calls[1][1]
-    expect(upserted.createdAt).toBe(now)
-    expect(upserted.deletedAt).toBeNull()
+    // An upsert is the same pipeline (round F9): birth stamps only when it inserts ($ifNull), the
+    // stored ones kept when it matches; the upsert option passed on.
+    const [, upsertPipeline, upsertOptions] = db.collection.updateOne.mock.calls[1]
+    const [kept, literal] = upsertPipeline[0].$replaceWith.$mergeObjects
+    expect(kept.createdAt).toEqual({ $ifNull: ["$createdAt", now] })
+    expect(kept.deletedAt).toEqual({ $ifNull: ["$deletedAt", null] })
+    expect(literal.$literal.updatedAt).toBe(now)
+    expect(upsertOptions).toMatchObject({ upsert: true })
   })
 
   // ——— bulkWrite. It used to fall through to the driver untouched, so it was the
@@ -442,7 +556,11 @@ describe("wrapDbWithAutoStamp + timeseries", () => {
     // that already have them.
     expect(ops[2].updateMany.update.$setOnInsert).toBeUndefined()
     expect(ops[2].updateMany.update.$set.updatedAt).toBe(now)
-    expect(ops[3].replaceOne.replacement).toMatchObject({ createdAt: now, updatedAt: now })
+    // A replace is an update pipeline keeping (or, on insert, stamping) the birth stamps (round F9).
+    expect(ops[3].updateOne.upsert).toBe(true)
+    const [kept, literal] = ops[3].updateOne.update[0].$replaceWith.$mergeObjects
+    expect(kept.createdAt).toEqual({ $ifNull: ["$createdAt", now] })
+    expect(literal.$literal).toMatchObject({ name: "c", updatedAt: now })
   })
 
   it("passes a bulkWrite delete through for a non-sync model", async () => {
@@ -466,5 +584,109 @@ describe("wrapDbWithAutoStamp + timeseries", () => {
     const inserted = db.collection.insertOne.mock.calls[0][0]
     expect(inserted.createdAt).toBe(100)
     expect(inserted.updatedAt).toBe(200)
+  })
+})
+
+describe("wrapDbWithAutoStamp: review round F5", () => {
+  it("findOneAndDelete on a sync model with decimal fields returns decimal strings, as findOneAndUpdate does", async () => {
+    const { Decimal128 } = await import("mongodb")
+    const { v } = await import("@/server/handlers")
+    defineModel("r5_synced_prices", { price: v.decimal128() }, { sync: true })
+    const db = makeFakeDb()
+    db.collection.findOneAndUpdate = vi.fn(async () => ({ _id: "p", price: Decimal128.fromString("9.99") }))
+    db.collection.findOneAndDelete = vi.fn() // a sync model's delete is rewritten to the update above
+    const doc: any = await wrapDbWithAutoStamp(db as any).model("r5_synced_prices").findOneAndDelete({ _id: "p" })
+    expect(doc.price).toBe("9.99")
+  })
+})
+
+describe("wrapDbWithAutoStamp: review round F7", () => {
+  // A replacement cannot know the row's createdAt / deletedAt, which withSyncFields makes required:
+  // validated as a full document, findOneAndReplace({ _id }, { name }) threw on a dbValidation
+  // model, where on main it passed straight to the driver.
+  it("a non-upsert replacement is validated without the engine stamps it cannot know; its own fields still are", async () => {
+    defineModel("r7_validated", { name: z4.string() }, { dbValidation: true })
+    const db = makeFakeDb()
+    db.collection.findOneAndReplace = vi.fn(async () => null)
+    const coll = wrapDbWithAutoStamp(db as any).model("r7_validated")
+    await expect(coll.findOneAndReplace({ _id: "a" }, { name: "x" })).resolves.toBeDefined() // not refused
+    await expect(coll.replaceOne({ _id: "a" }, { name: "x" })).resolves.toBeDefined()
+    expect(() => coll.replaceOne({ _id: "a" }, { name: 5 })).toThrow(/Validation failed for r7_validated.replaceOne: name/)
+  })
+
+  // The soft-delete rewrite rebuilt bulkWrite's delete from its filter alone: a collation (a
+  // case-insensitive match) or hint was dropped, and the row it named stayed live.
+  it("bulkWrite's soft deletes keep the op's collation and hint", async () => {
+    defineModel("r7_synced_bulk", undefined, { sync: true })
+    const db = makeFakeDb()
+    const collation = { locale: "en", strength: 2 }
+    await wrapDbWithAutoStamp(db as any).model("r7_synced_bulk").bulkWrite([
+      { deleteOne: { filter: { email: "A@x.com" }, collation, hint: "email_1" } },
+      { deleteMany: { filter: { org: "o" }, hint: "org_1" } },
+    ])
+    const [ops] = db.collection.bulkWrite.mock.calls[0]
+    expect(ops[0].updateOne).toMatchObject({ collation, hint: "email_1" })
+    expect(ops[1].updateMany).toMatchObject({ hint: "org_1" })
+  })
+})
+
+describe("wrapDbWithAutoStamp: review round F8", () => {
+  // ctx.runMutation(name, args, { db: ctx.useDatabase("x") }) hands _runMutation a db already
+  // wrapped, which it wrapped again: every write was stamped, validated and Decimal128-encoded
+  // twice, and the second validation refused the encoded value of a valid v.decimal128() write.
+  it("wrapping a wrapped db returns it as it is, so a write is stamped, validated and encoded once", async () => {
+    const { v } = await import("@/server/handlers")
+    defineModel("r8_priced", { amount: v.decimal128() }, { dbValidation: true })
+    const db = makeFakeDb()
+    const once = wrapDbWithAutoStamp(db as any)
+    const twice = wrapDbWithAutoStamp(once)
+    expect(twice).toBe(once)
+    await twice.model("r8_priced").insertOne({ amount: "12.50" }) // threw "Validation failed"
+    expect(db.collection.insertOne).toHaveBeenCalledTimes(1)
+    expect(String(db.collection.insertOne.mock.calls[0][0].amount)).toBe("12.50")
+  })
+})
+describe("wrapDbWithAutoStamp: review round F11", () => {
+  // zod v4 refuses .partial() on an object schema carrying a refinement. The replace check used it
+  // (to leave out the stamps a replacement cannot know), so every replace on such a model threw
+  // ".partial() cannot be used on object schemas containing refinements" — on main the replace was
+  // checked as a full document and passed. A $set check threw the same way (on main too).
+  const refined = () => z4.object({ a: z4.number(), b: z4.number() }).refine((d) => d.a <= d.b, { message: "a above b" })
+
+  it("a replace on a model whose schema has a refinement is checked as a whole document, refinement included", async () => {
+    defineModel("r11_refined_replace", refined() as any, { dbValidation: true })
+    const db = makeFakeDb()
+    const coll = wrapDbWithAutoStamp(db as any).model("r11_refined_replace")
+    await expect(coll.replaceOne({ _id: "x" }, { a: 1, b: 2 })).resolves.toBeDefined()
+    expect(db.collection.updateOne).toHaveBeenCalledTimes(1)
+    expect(() => coll.replaceOne({ _id: "x" }, { a: "1", b: 2 })).toThrow(/Validation failed for r11_refined_replace.replaceOne: a/)
+    expect(() => coll.replaceOne({ _id: "x" }, { a: 3, b: 2 })).toThrow(/Validation failed for r11_refined_replace.replaceOne: .*a above b/)
+  })
+
+  it("a $set on a model whose schema has a refinement checks each field it sets", async () => {
+    defineModel("r11_refined_set", refined() as any, { dbValidation: true })
+    const db = makeFakeDb()
+    const coll = wrapDbWithAutoStamp(db as any).model("r11_refined_set")
+    await expect(coll.updateOne({ _id: "x" }, { $set: { a: 5 } })).resolves.toBeDefined()
+    expect(db.collection.updateOne).toHaveBeenCalledTimes(1)
+    expect(() => coll.updateOne({ _id: "x" }, { $set: { a: "5" } })).toThrow(/Validation failed for r11_refined_set.updateOne: a/)
+  })
+})
+
+describe("wrapDbWithAutoStamp: review round F13", () => {
+  // Every validated $set built its partial schema anew (a clone without refinements, then
+  // .partial()), and a plain-shape model's schema was rebuilt as a z.object on every lookup:
+  // two or three new zod objects per write on a dbValidation model under load.
+  it("builds a model's schema, and its partial, once", async () => {
+    const { getModelZodSchema } = await import("@/runtime/models")
+    defineModel("f13_shape", { name: z4.string() }, { dbValidation: true })
+    expect(getModelZodSchema("f13_shape")).toBe(getModelZodSchema("f13_shape"))
+    defineModel("f13_object", z4.object({ name: z4.string() }), { dbValidation: true })
+    const partial = vi.spyOn(getModelZodSchema("f13_object"), "partial")
+    const db = makeFakeDb()
+    const coll = wrapDbWithAutoStamp(db as any).model("f13_object")
+    await coll.updateOne({ _id: "a" }, { $set: { name: "x" } })
+    await coll.updateOne({ _id: "b" }, { $set: { name: "y" } })
+    expect(partial).toHaveBeenCalledTimes(1)
   })
 })

@@ -99,3 +99,53 @@ describe("refetchScheduler — backpressure", () => {
     expect(run).toHaveBeenCalledTimes(2)
   })
 })
+
+describe("refetchScheduler — maxWait (scalability review)", () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it("a burst with events closer than the debounce still runs every maxWaitMs", async () => {
+    const run = vi.fn(async () => {})
+    const sched = createRefetchScheduler({ debounceMs: 100, maxWaitMs: 1000 })
+    for (let t = 0; t < 2000; t += 50) {
+      sched.schedule("k", run)
+      await vi.advanceTimersByTimeAsync(50)
+    }
+    // A webhook burst of 2 s: without maxWait, nothing ran until it ended.
+    expect(run.mock.calls.length).toBeGreaterThanOrEqual(2)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(run.mock.calls.length).toBeLessThanOrEqual(3)
+  })
+
+  it("without maxWaitMs, a burst runs once, after it ends", async () => {
+    const run = vi.fn(async () => {})
+    const sched = createRefetchScheduler({ debounceMs: 100 })
+    for (let t = 0; t < 2000; t += 50) {
+      sched.schedule("k", run)
+      await vi.advanceTimersByTimeAsync(50)
+    }
+    expect(run).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("refetchScheduler: review round F9", () => {
+  // cancel() left an in-flight entry in the map: a replaced subscription's hung re-run kept its
+  // key in flight, so its replacement's every later run was queued behind it — and never fired —
+  // and the entry (with the socket in its closures) was never removed.
+  it("cancel removes an entry even while its run is in flight; the next schedule starts afresh", async () => {
+    const { createRefetchScheduler } = await import("@/server/refetchScheduler")
+    const scheduler = createRefetchScheduler({ debounceMs: 0 })
+    let started = 0
+    scheduler.schedule("k", () => {
+      started++
+      return new Promise<void>(() => {}) // hangs
+    })
+    await vi.waitFor(() => expect(started).toBe(1))
+    scheduler.cancel("k")
+    let ran = false
+    scheduler.schedule("k", async () => void (ran = true))
+    await vi.waitFor(() => expect(ran).toBe(true))
+  })
+})

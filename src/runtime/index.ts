@@ -62,3 +62,4 @@ export {
   deepEqual,
 }
 export type { ModelDef, ModelOptions, PagingParams, PagingResult, MongoFilter }
+export type { ArgsIssue, InvalidArgsError } from "@/server/handlers"

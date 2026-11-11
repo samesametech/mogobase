@@ -22,6 +22,7 @@ import { appSchema, tableSchema } from "@nozbe/watermelondb"
 import type { IndexDescription, CreateIndexesOptions } from "mongodb"
 
 import { WatermelonMongoAdapter } from "./adapter"
+import { decimal128Paths } from "@/runtime/decimal"
 import type { SyncHandle, SyncOptions } from "@/client/sync-types"
 
 type ModelDef = { schema?: any; indexes?: { indexSpecs: IndexDescription[]; options?: CreateIndexesOptions } }
@@ -107,7 +108,8 @@ export class MogobaseWatermelonDB {
     this._wdb = new Database({ adapter, modelClasses: modelClasses as any })
     const broadcast = (msg: CrossTabMsg) => this._broadcast(msg)
     for (const name of this._pending.keys()) {
-      this._adapters.set(name, new WatermelonMongoAdapter(this._wdb, name, broadcast))
+      const decimalFields = new Set(decimal128Paths(this._pending.get(name)?.schema))
+      this._adapters.set(name, new WatermelonMongoAdapter(this._wdb, name, broadcast, decimalFields))
     }
     this._setupCrossTabSync()
     return this._wdb

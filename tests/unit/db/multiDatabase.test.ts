@@ -176,7 +176,11 @@ describe("MogobaseDB._resolveActive", () => {
       return null
     })
     await (DB as any)._resolveActive({ x: 1 })
-    expect(seen).toEqual([{ x: 1 }])
+    // A headerView (a Fetch Headers copy carrying the plain keys, which read its list): a header's
+    // value is a string, as in Node's headers.
+    expect(seen).toHaveLength(1)
+    expect({ ...seen[0] }).toEqual({ x: "1" })
+    expect(seen[0].get("x")).toBe("1")
   })
 
   it("throws a descriptive error when the resolver throws", async () => {

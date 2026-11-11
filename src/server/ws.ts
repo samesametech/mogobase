@@ -1,34 +1,31 @@
 // import { upgradeWebSocket } from "hono/cloudflare-workers";
 import { createNodeWebSocket, NodeWebSocket } from "@hono/node-ws"
-import handlers from "./handlers"
-import DB from "@/db"
-import {
-  pullChanges,
-  pushChanges,
-  streamChanges,
-  filterToWatchPipeline,
-  type SyncPolicy,
-  type SyncPolicyDecision,
-} from "./sync"
+import { defaultFormatError, resolveRequestDb, watchTarget } from "./requestDb"
+import { headerView } from "./headers"
+import { syncHub, type SyncPolicy } from "./sync"
+import { endSync } from "./syncMessages"
+import { handleMessage } from "./messages"
 import { Hono } from "hono"
 import { ServerType } from "@hono/node-server"
-import { ChangeStream, ChangeStreamOptions, Document } from "mongodb"
-import { normalizeWatchInputToPipeline } from "./watchInput"
+import { pipelineOf, routeWatchInput } from "./watchInput"
+import { createLiveQueries, DEFAULT_MAX_BUFFERED_BYTES, numberOption, type LiveQueries, type LiveQueryOptions } from "./liveQuery"
+import { openSpecWatch, warnUnnarrowed, watchKey } from "./changeStreamWatch"
 
-type PaginatedSub = {
-  name: string
-  baseArgs: any
-  headers: any
-  limit: number
-  sortAscending: boolean
-  sortCaseInsensitive: boolean
-  loadedCount: number
-  hasPrevious: boolean
-  hasNext: boolean
-  nextCursor?: string
-  previousCursor?: string
-  changeStreams: ChangeStream[]
-  queue: Promise<void>
+// The live-query options the legacy transport lets an app set (setLiveQueryOptions), by
+// attachMogobaseWebSocket's names: one list, so an option added here is passed on without another
+// hand-written line. maxRerunRows and maxBufferedBytes were dropped unsaid; refetchMaxWaitMs is
+// refused (said so): this transport re-runs at once, with no debounce for it to bound.
+const LIVE_OPTION_KEYS = [
+  "maxSubscriptionsPerSocket",
+  "maxConcurrentRunsPerSocket",
+  "turnTimeoutMs",
+  "maxRerunRows",
+  "maxBufferedBytes",
+] as const
+
+/** What `ws.setLiveQueryOptions` takes: attachMogobaseWebSocket's live-query options, but the debounce's. */
+export type LegacyLiveOptions = Pick<LiveQueryOptions, "maxSubscriptionsPerSocket" | "maxConcurrentRunsPerSocket" | "turnTimeoutMs" | "maxRerunRows"> & {
+  maxBufferedBytes?: number
 }
 
 class WebSocket {
@@ -37,6 +34,80 @@ class WebSocket {
   _nodeWebSocket?: NodeWebSocket
   _state: Map<string, any> = new Map()
   _syncPolicy?: SyncPolicy
+
+  // Queries and paginated queries: the same engine attachWs uses, so both transports
+  // re-register watches on every run. Every watch here is a change stream of its own, with
+  // the pipeline pushed to MongoDB; there is no shared hub on this legacy path.
+  //
+  // Built on first use, not as a field initializer: field initializers run on every
+  // `new WebSocket()` before the constructor hands back the singleton, so each call built
+  // an engine (and its scheduler) only to throw it away.
+  _liveEngine?: LiveQueries
+  get _live(): LiveQueries {
+    return (this._liveEngine ??= this._createLive())
+  }
+
+  /** The live-query options (setLiveQueryOptions); the engine's defaults when unset. */
+  _liveOptions?: LegacyLiveOptions
+  /** The send buffer above which a socket's change-triggered re-runs are held (maxBufferedBytes). */
+  _maxBufferedBytes = DEFAULT_MAX_BUFFERED_BYTES
+
+  /**
+   * The live-query options, as attachMogobaseWebSocket takes them: `maxSubscriptionsPerSocket`
+   * (default 32), `maxConcurrentRunsPerSocket` (4), `turnTimeoutMs` (5000), `maxRerunRows` (1000)
+   * and `maxBufferedBytes` (1 MiB) — not `refetchMaxWaitMs`: re-runs here are not debounced. Every watch on this transport is a
+   * change stream of its own, holding a pooled connection, so a socket's subscriptions are its
+   * streams. Call it before the server takes connections, as setSyncPolicy.
+   */
+  setLiveQueryOptions(options: LegacyLiveOptions) {
+    if (this._liveEngine) {
+      console.warn("[mogobase/ws] setLiveQueryOptions after the first connection is ignored: call it before the server takes connections")
+      return
+    }
+    // The documented fields only (anything else is not passed on, and said so), added to what an
+    // earlier call set: replaced, a second call reset the fields it left out.
+    const next: Record<string, unknown> = { ...this._liveOptions }
+    for (const [key, value] of Object.entries(options ?? {})) {
+      if (!(LIVE_OPTION_KEYS as readonly string[]).includes(key)) {
+        console.warn(`[mogobase/ws] setLiveQueryOptions: ${key} ignored — the legacy transport takes ${LIVE_OPTION_KEYS.join(", ")}`)
+      } else if (value !== undefined) next[key] = value
+    }
+    this._liveOptions = next
+  }
+
+  _createLive(): LiveQueries {
+    const { maxBufferedBytes, ...engineOptions } = this._liveOptions ?? {}
+    this._maxBufferedBytes = numberOption("maxBufferedBytes", maxBufferedBytes, DEFAULT_MAX_BUFFERED_BYTES, 0)
+    return createLiveQueries({
+      ...engineOptions,
+      debounceMs: 0,
+      formatError: defaultFormatError,
+      // ONE resolution for the handler and the change streams it opens. Resolving in two
+      // places is how they drift apart: with a per-request resolver the handler reads the
+      // tenant's database while the watch listens to the default one, so the query answers
+      // correctly once and then never updates. Nothing throws.
+      resolveActive: resolveRequestDb,
+      watchSpec: (model, pipelineOrFilter, options, active) => {
+        const { dbName, db, driverOptions, ignoreFields } = watchTarget(model, options, active)
+        // Routed as on attachWs, run by MongoDB: an operator no change stream runs ($where, $text,
+        // $near) watches the whole collection — kept, the stream was refused on every attempt and
+        // the query never updated.
+        const routed = routeWatchInput(pipelineOrFilter)
+        if (routed.kind === "hub" && routed.unnarrowed) warnUnnarrowed(dbName, model, routed.unnarrowed, "live-query watch")
+        const pipeline = pipelineOf(routed)
+        return {
+          key: watchKey({ kind: "stream", dbName, model, filter: pipeline, driverOptions, ignoreFields }),
+          model,
+          db: db(),
+          pipeline,
+          options: driverOptions,
+          ignoreFields,
+        }
+      },
+      openWatch: async (spec, onEvent, onDead) =>
+        openSpecWatch(spec, onEvent, onDead, "ws"),
+    })
+  }
 
   constructor() {
     if (!WebSocket._instance) {
@@ -49,405 +120,21 @@ class WebSocket {
     this._syncPolicy = policy
   }
 
-  async _evaluatePolicy(op: "pull" | "push" | "watch", model: string, headers: any): Promise<SyncPolicyDecision> {
-    if (!this._syncPolicy) return { allow: true }
-    try {
-      return await this._syncPolicy({ op, model, headers })
-    } catch (err) {
-      console.warn(`[mogobase/sync] policy threw for ${op} ${model}:`, err)
-      return { allow: false }
-    }
-  }
-
-  async _closeStreams(id: string) {
-    const streams: ChangeStream[] = this._state.get(id)?.changeStreams || []
-    for (const s of streams) {
-      try {
-        await s.close()
-      } catch {}
-    }
-    const current = this._state.get(id)
-    if (current) this._state.set(id, { ...current, changeStreams: [] })
-  }
-
-  async _closePaginatedSub(id: string) {
-    const streams: ChangeStream[] = this._state.get(id)?.paginated?.changeStreams || []
-    for (const cs of streams) {
-      try {
-        await cs.close()
-      } catch {}
-    }
-    const current = this._state.get(id)
-    if (current) this._state.set(id, { ...current, paginated: undefined })
-  }
-
-  _bindStreamToSocket(socket: any, cs: ChangeStream) {
-    const raw = socket?.raw
-    if (!raw || typeof raw.once !== "function" || typeof raw.removeListener !== "function") return
-    const onClose = () => {
-      cs.close().catch(() => {})
-    }
-    raw.once("close", onClose)
-    cs.once("close", () => raw.removeListener("close", onClose))
-  }
-
-  async _runRefetch(id: string, socket: any, sub: PaginatedSub) {
-    const state = this._state.get(id)
-    if (!state || state.paginated !== sub) return
-
-    const paginationOpts = {
-      limit: sub.loadedCount,
-      sortAscending: sub.sortAscending,
-      sortCaseInsensitive: sub.sortCaseInsensitive,
-    }
-    const callArgs = { ...sub.baseArgs, paginationOpts }
-
-    try {
-      await DB.connect()
-      const rs = await handlers._runQuery(sub.name, callArgs, {
-        headers: sub.headers || null,
-        db: DB,
-        watch: () => {},
-      })
-      if (!rs?.results) throw new Error("Invalid paginated result")
-
-      sub.loadedCount = rs.results.length
-      sub.hasPrevious = !!rs.hasPrevious
-      sub.hasNext = !!rs.hasNext
-      sub.nextCursor = rs.hasNext ? rs.next : undefined
-      sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
-
-      socket.send(JSON.stringify({ type: "PaginatedQueryResult", success: true, data: rs }))
-    } catch (error: any) {
-      socket.send(
-        JSON.stringify({
-          type: "PaginatedQueryResult",
-          success: false,
-          error: `${error?.message || error}`,
-        })
-      )
-    }
-  }
-
-  _scheduleRefetch(id: string, socket: any, sub: PaginatedSub) {
-    sub.queue = sub.queue.then(() => this._runRefetch(id, socket, sub)).catch(() => {})
-  }
-
-  async _runPaginatedInitial(socket: any, id: string, headers: any, name: string, args: any) {
-    await this._closePaginatedSub(id)
-    await DB.connect()
-
-    const paginationOpts = args?.paginationOpts || {}
-    const baseArgs = { ...(args || {}) }
-    delete baseArgs.paginationOpts
-
-    const pendingStreams: ChangeStream[] = []
-    const sub: PaginatedSub = {
-      name,
-      baseArgs,
-      headers,
-      limit: paginationOpts.limit ?? 10,
-      sortAscending: paginationOpts.sortAscending ?? true,
-      sortCaseInsensitive: paginationOpts.sortCaseInsensitive ?? false,
-      loadedCount: 0,
-      hasPrevious: false,
-      hasNext: false,
-      changeStreams: [],
-      queue: Promise.resolve(),
-    }
-
-    // ONE resolution for the handler and the change streams it opens. Resolving in two
-    // places is how they drift apart: with a per-request resolver the handler reads the
-    // tenant's database while the watch listens to the default one, so the query answers
-    // correctly once and then never updates. Nothing throws.
-    const active = (await (DB as any)._resolveActive(headers)) as typeof DB
-    try {
-      const rs = await handlers._runQuery(name, args, {
-        headers: headers || null,
-        db: active,
-        _resolved: true,
-        watch: (modelName: string, pipelineOrFilter?: Document[] | Document) => {
-          if (socket?.readyState !== 1) return
-          const pipeline = normalizeWatchInputToPipeline(pipelineOrFilter)
-          const cs = active.model(modelName).watch(pipeline, {
-            fullDocument: "updateLookup",
-          } as ChangeStreamOptions)
-          pendingStreams.push(cs)
-        },
-      })
-      if (!rs?.results) {
-        throw new Error("Invalid paginated result. Make sure the return value is from MongoPaging.find")
-      }
-
-      const existing = this._state.get(id)
-      if (socket?.readyState !== 1 || !existing) {
-        for (const cs of pendingStreams) {
-          try {
-            await cs.close()
-          } catch {}
-        }
-        return
-      }
-
-      sub.loadedCount = rs.results.length
-      sub.hasPrevious = !!rs.hasPrevious
-      sub.hasNext = !!rs.hasNext
-      sub.nextCursor = rs.hasNext ? rs.next : undefined
-      sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
-      sub.changeStreams = pendingStreams
-
-      this._state.set(id, { ...existing, paginated: sub })
-
-      for (const cs of pendingStreams) {
-        this._bindStreamToSocket(socket, cs)
-        cs.on("change", () => this._scheduleRefetch(id, socket, sub))
-      }
-
-      socket.send(JSON.stringify({ type: "PaginatedQueryResult", success: true, data: rs }))
-    } catch (error: any) {
-      for (const cs of pendingStreams) {
-        try {
-          await cs.close()
-        } catch {}
-      }
-      socket.send(
-        JSON.stringify({
-          type: "PaginatedQueryResult",
-          success: false,
-          error: `${error?.message || error}`,
-        })
-      )
-    }
-  }
-
-  async _runPaginatedLoadMore(socket: any, id: string, direction: "next" | "previous") {
-    const state = this._state.get(id)
-    const sub: PaginatedSub | undefined = state?.paginated
-    if (!sub) {
-      return socket.send(
-        JSON.stringify({
-          type: "PaginatedQueryPage",
-          success: false,
-          direction,
-          error: "No active paginated subscription",
-        })
-      )
-    }
-    const cursor = direction === "next" ? sub.nextCursor : sub.previousCursor
-    if (!cursor) {
-      return socket.send(
-        JSON.stringify({
-          type: "PaginatedQueryPage",
-          success: true,
-          direction,
-          data: { results: [], hasPrevious: sub.hasPrevious, hasNext: sub.hasNext },
-        })
-      )
-    }
-    const paginationOpts: any = {
-      limit: sub.limit,
-      sortAscending: sub.sortAscending,
-      sortCaseInsensitive: sub.sortCaseInsensitive,
-    }
-    if (direction === "next") paginationOpts.next = cursor
-    else paginationOpts.previous = cursor
-    const callArgs = { ...sub.baseArgs, paginationOpts }
-
-    sub.queue = sub.queue
-      .then(async () => {
-        try {
-          await DB.connect()
-          const rs = await handlers._runQuery(sub.name, callArgs, {
-            headers: sub.headers || null,
-            db: DB,
-            watch: () => {},
-          })
-          if (!rs?.results) throw new Error("Invalid paginated result")
-          sub.loadedCount += rs.results.length
-          if (direction === "next") {
-            sub.hasNext = !!rs.hasNext
-            sub.nextCursor = rs.hasNext ? rs.next : undefined
-          } else {
-            sub.hasPrevious = !!rs.hasPrevious
-            sub.previousCursor = rs.hasPrevious ? rs.previous : undefined
-          }
-          socket.send(JSON.stringify({ type: "PaginatedQueryPage", success: true, direction, data: rs }))
-        } catch (error: any) {
-          socket.send(
-            JSON.stringify({
-              type: "PaginatedQueryPage",
-              success: false,
-              direction,
-              error: `${error?.message || error}`,
-            })
-          )
-        }
-      })
-      .catch(() => {})
-  }
-
+  // The routing is the protocol's, shared with attachWs (messages.ts); this is the socket wiring.
   async _handleEvent(event: any, socket: any, id: string, headers: any) {
-    const data = JSON.parse(event.data)
-    const { type, name, args } = data
-
-    if (type === "paginated-query-load-next" || type === "paginated-query-load-previous") {
-      return this._runPaginatedLoadMore(socket, id, type === "paginated-query-load-next" ? "next" : "previous")
-    }
-
-    if (type === "sync-subscribe") {
-      const models: string[] = Array.isArray(data.models) ? data.models : []
-      const prev = this._state.get(id)
-      if (prev?.syncUnsub) {
-        try {
-          prev.syncUnsub()
-        } catch {}
-      }
-      const specs: { model: string; pipeline?: any[] }[] = []
-      for (const model of models) {
-        const decision = await this._evaluatePolicy("watch", model, headers)
-        if (!decision.allow) continue
-        const pipeline = decision.filter ? filterToWatchPipeline(decision.filter) : undefined
-        specs.push({ model, pipeline })
-      }
-      const unsub = streamChanges(specs, (model) => {
-        if (socket?.readyState !== 1) return
-        socket.send(JSON.stringify({ type: "sync-stream", model }))
-      })
-      const current = this._state.get(id) || {}
-      this._state.set(id, { ...current, syncUnsub: unsub })
-      return
-    }
-
-    if (type === "sync-pull") {
-      try {
-        const decision = await this._evaluatePolicy("pull", data.model, headers)
-        if (!decision.allow) {
-          throw new Error("Forbidden")
-        }
-        const rs = await pullChanges({
-          model: data.model,
-          checkpoint: data.checkpoint ?? null,
-          batchSize: data.batchSize,
-          extraFilter: decision.filter,
-        })
-        socket.send(
-          JSON.stringify({
-            type: "SyncPullResult",
-            model: data.model,
-            documents: rs.documents,
-            checkpoint: rs.checkpoint,
-          })
-        )
-      } catch (error: any) {
-        socket.send(
-          JSON.stringify({
-            type: "SyncPullResult",
-            model: data.model,
-            success: false,
-            error: `${error?.message || error}`,
-            documents: [],
-            checkpoint: data.checkpoint ?? null,
-          })
-        )
-      }
-      return
-    }
-
-    if (type === "sync-push") {
-      try {
-        const decision = await this._evaluatePolicy("push", data.model, headers)
-        if (!decision.allow) {
-          throw new Error("Forbidden")
-        }
-        const rs = await pushChanges({
-          model: data.model,
-          rows: Array.isArray(data.rows) ? data.rows : [],
-          transform: decision.transform,
-        })
-        socket.send(
-          JSON.stringify({
-            type: "SyncPushResult",
-            model: data.model,
-            conflicts: rs.conflicts,
-          })
-        )
-      } catch (error: any) {
-        socket.send(
-          JSON.stringify({
-            type: "SyncPushResult",
-            model: data.model,
-            success: false,
-            error: `${error?.message || error}`,
-            conflicts: [],
-          })
-        )
-      }
-      return
-    }
-
-    if (!name) {
-      return socket.send(JSON.stringify({ success: false, error: "Name is required" }))
-    }
-
-    let rs
-    if (type === "query") {
-      await this._closeStreams(id)
-      const func = async (noWatch?: boolean) => {
-        await DB.connect()
-        // Same rule as the paginated path above: resolve once, hand it to both.
-        const active = (await (DB as any)._resolveActive(headers)) as typeof DB
-        rs = await handlers._runQuery(name, args, {
-          headers: headers || null,
-          db: active,
-          _resolved: true,
-          watch: (modelName: string, pipelineOrFilter?: Document[] | Document, options?: ChangeStreamOptions) => {
-            if (noWatch) return
-            if (socket?.readyState !== 1) return
-            const state = this._state.get(id)
-            if (!state) return
-            const pipeline = normalizeWatchInputToPipeline(pipelineOrFilter)
-            const changeStream = active.model(modelName).watch(pipeline, {
-              ...(options || {}),
-              fullDocument: "updateLookup",
-            })
-            this._bindStreamToSocket(socket, changeStream)
-            const streams: ChangeStream[] = state.changeStreams || []
-            streams.push(changeStream)
-            this._state.set(id, { ...state, changeStreams: streams })
-            changeStream.on("change", () => {
-              func(true)
-            })
-          },
-        })
-        socket.send(JSON.stringify({ type: "QueryResult", success: true, data: rs }))
-      }
-      func()
-    } else if (type === "paginated-query") {
-      await this._runPaginatedInitial(socket, id, headers, name, args)
-    } else if (type === "mutation") {
-      // MUTATIONS DO NOT TRAVEL OVER THE SOCKET. `useMutation` has always POSTed to
-      // /api/handlers when online and run against the client DB when offline, so this branch
-      // served no first-party caller — but it ran the full public mutation set under the
-      // handshake's session, which made it a second write door nobody instruments.
-      //
-      // That is what broke: an app wrapping its HTTP routes to record WHO is acting (an audit
-      // trail, a request id, a tenant stamp) covers the door it knows about, and writes
-      // arriving here carry none of it. The authorization is identical — the same
-      // requireUser, the same handler — so nothing looks wrong; the write is simply
-      // unattributed. A door that cannot be instrumented from outside the library is better
-      // closed than documented.
-      //
-      // Refused rather than removed, so a caller relying on it gets an error naming the fix
-      // instead of a silent no-op.
-      socket.send(
-        JSON.stringify({
-          type: "MutationResult",
-          success: false,
-          error:
-            "[mogobase] Mutations are not accepted over the WebSocket — POST them to /api/handlers, which is what useMutation does.",
-        })
-      )
-    }
+    return handleMessage(String(event.data), {
+      id,
+      headers,
+      send: (payload) => {
+        if (socket?.readyState === 1) socket.send(JSON.stringify(payload))
+      },
+      live: this._live,
+      syncState: () => this._state.get(id),
+      syncPolicy: this._syncPolicy,
+      syncHub: syncHub(),
+      formatError: defaultFormatError,
+      label: "ws",
+    })
   }
 
   createNodeWebSocket(app: Hono) {
@@ -459,26 +146,33 @@ class WebSocket {
       throw new Error("Call createNodeWebSocket() first")
     }
     return this._nodeWebSocket.upgradeWebSocket((c) => {
-      const headers = c.req.raw.headers
+      // One shape on every transport (headerView): plain keys, as attachWs's, and the Fetch methods.
+      const headers = headerView(c.req.raw.headers)
       const id = crypto.randomUUID()
       return {
         onMessage: (event, ws) => {
           const state = this._state.get(id)
           if (!state) {
             this._state.set(id, { ws })
+            this._live.open(id, {
+              headers,
+              isOpen: () => ws.readyState === 1,
+              send: (payload) => ws.send(JSON.stringify(payload)),
+              // Backpressure, as on attachWs: the underlying socket's unsent bytes.
+              isBackedUp: () => ((ws as any).raw?.bufferedAmount ?? 0) > this._maxBufferedBytes,
+            })
           }
-          this._handleEvent(event, ws, id, headers)
+          // Never left to reject unhandled: a policy that throws here would otherwise take the
+          // process down (Node's default for an unhandled rejection).
+          this._handleEvent(event, ws, id, headers).catch((err) => console.warn("[mogobase/ws] message failed:", err))
         },
         onClose: async () => {
-          await this._closeStreams(id)
-          await this._closePaginatedSub(id)
           const s = this._state.get(id)
-          if (s?.syncUnsub) {
-            try {
-              s.syncUnsub()
-            } catch {}
-          }
           this._state.delete(id)
+          endSync(s)
+          // Not `_live`: its getter builds the engine, so a socket closing before its first
+          // message fixed the limits before setLiveQueryOptions could set them.
+          await this._liveEngine?.close(id)
         },
       }
     })

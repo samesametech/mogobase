@@ -11,6 +11,7 @@
 import { Database, Q } from "@nozbe/watermelondb"
 
 import { applyUpdate, decodeRaw, genId, getPath, matches, MongoFilter, MongoUpdate } from "./filters"
+import { compareDecimalStrings } from "@/runtime/filterMatcher"
 
 export type CrossTabMsg =
   | { table: string; op: "upsert"; doc: any }
@@ -40,7 +41,14 @@ class FindCursor {
   private _skip?: number
   private _limit?: number
 
-  constructor(private wdb: Database, private tableName: string, private filter: MongoFilter) {}
+  constructor(
+    private wdb: Database,
+    private tableName: string,
+    private filter: MongoFilter,
+    // The model's v.decimal128() fields (decimal128Paths): their decimal strings compare with
+    // numbers by value, and sort by value, as the server's Decimal128 values do.
+    private decimalFields: ReadonlySet<string> = new Set()
+  ) {}
 
   sort(spec: any) {
     this._sort = spec
@@ -64,7 +72,7 @@ class FindCursor {
       .query(Q.where("deleted_at", null))
       .fetch()
     const docs = records.map((r) => decodeRaw((r as any)._raw))
-    const filtered = docs.filter((d) => matches(d, this.filter))
+    const filtered = docs.filter((d) => matches(d, this.filter, { numericStrings: this.decimalFields }))
     if (this._sort) {
       const entries = Array.isArray(this._sort)
         ? this._sort
@@ -74,7 +82,9 @@ class FindCursor {
           const av = getPath(a, k)
           const bv = getPath(b, k)
           if (av === bv) continue
-          const cmp = av < bv ? -1 : 1
+          const byValue = this.decimalFields.has(k) ? compareDecimalStrings(av, bv) : undefined
+          if (byValue === 0) continue
+          const cmp = byValue ?? (av < bv ? -1 : 1)
           return dir === 1 || dir === "asc" ? cmp : -cmp
         }
         return 0
@@ -98,19 +108,25 @@ export class WatermelonMongoAdapter {
   constructor(
     public _wdb: Database,
     public name: string,
-    private _broadcast: BroadcastFn = () => {}
+    private _broadcast: BroadcastFn = () => {},
+    private _decimalFields: ReadonlySet<string> = new Set()
   ) {}
+
+  /** The model's v.decimal128() fields — the paging polyfill orders a paginatedField among them by value. */
+  get decimalFields(): ReadonlySet<string> {
+    return this._decimalFields
+  }
 
   private coll() {
     return this._wdb.get(this.name)
   }
 
   find(filter: MongoFilter = {}) {
-    return new FindCursor(this._wdb, this.name, filter)
+    return new FindCursor(this._wdb, this.name, filter, this._decimalFields)
   }
 
   async findOne(filter: MongoFilter = {}): Promise<any | null> {
-    const out = await new FindCursor(this._wdb, this.name, filter).limit(1).toArray()
+    const out = await new FindCursor(this._wdb, this.name, filter, this._decimalFields).limit(1).toArray()
     return out[0] ?? null
   }
 

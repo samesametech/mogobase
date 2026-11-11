@@ -11,6 +11,7 @@ import type z4 from "zod/v4"
 import type { IndexDescription, CreateIndexesOptions } from "mongodb"
 
 import { RxMongoAdapter } from "./adapter"
+import { decimal128Paths } from "@/runtime/decimal"
 import type { SyncHandle, SyncOptions } from "@/client/sync-types"
 
 addRxPlugin(RxDBQueryBuilderPlugin)
@@ -134,6 +135,12 @@ export class MogobaseClientDB {
     indexes?: ModelDef["indexes"]
   ): Promise<RxMongoAdapter> {
     const db = await this.connect()
+    // Built already: the collection's JSON schema is its first definition's, and so are the
+    // adapter's decimal fields. A second call (React strict mode's double mount, another file
+    // defining the model) used to rebuild the adapter from its own schema — none, for a file that
+    // only opts the model into sync — and paging a decimal field went back to text order.
+    const built = this._adapters.get(name)
+    if (built && db.collections[name]) return built
     this._schemas.set(name, { schema, indexes })
     if (!db.collections[name]) {
       const jsonSchema = schema
@@ -154,7 +161,7 @@ export class MogobaseClientDB {
           }
       await db.addCollections({ [name]: { schema: jsonSchema } })
     }
-    const adapter = new RxMongoAdapter(db.collections[name] as RxCollection, name)
+    const adapter = new RxMongoAdapter(db.collections[name] as RxCollection, name, new Set(decimal128Paths(schema)))
     this._adapters.set(name, adapter)
     return adapter
   }

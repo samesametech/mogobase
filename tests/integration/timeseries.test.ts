@@ -14,8 +14,9 @@
 // Requires MongoDB >= 5.0 for timeseries; mongodb-memory-server defaults to
 // 6.0.14 which is fine.
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest"
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest"
 import MongoPagingUpstream from "mongo-cursor-pagination"
+import { Db } from "mongodb"
 import { connectTestMongo, getTestMongoUri } from "../helpers/mongo"
 import DB, { buildFilters } from "@/db"
 import { defineModel } from "@/runtime/models"
@@ -182,5 +183,112 @@ describe("sync rejection for timeseries", () => {
     await expect(
       pullChanges({ model: MODEL, checkpoint: null })
     ).rejects.toThrow(/time-series/i)
+  })
+})
+
+describe("a lost create race (review round 3)", () => {
+  const RACED = "ts_raced"
+  // The probe finds nothing; the collection appears before createCollection runs, so
+  // createCollection answers NamespaceExists. What appeared decides whether that is fine.
+  async function race(winner: "timeseries" | "regular") {
+    const db = DB.db
+    try { await db.dropCollection(RACED) } catch {}
+    const probe = vi.spyOn(db, "listCollections").mockImplementationOnce((() => ({
+      toArray: async () => {
+        await db.createCollection(RACED, winner === "timeseries" ? { timeseries: { timeField: "ts" } } : {})
+        return []
+      },
+    })) as any)
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await (DB as any)._applyModelToDb(db, RACED, { timeseries: { timeField: "ts" } })
+      return warn.mock.calls.map((c) => String(c[0]))
+    } finally {
+      probe.mockRestore()
+      warn.mockRestore()
+      try { await db.dropCollection(RACED) } catch {}
+    }
+  }
+
+  it("lost to a concurrent build of the model: silent", async () => {
+    expect(await race("timeseries")).toEqual([])
+  })
+
+  it("lost to a regular collection: still warns, since MongoDB cannot convert it", async () => {
+    expect((await race("regular")).some((m) => /failed to create timeseries collection ts_raced/.test(m))).toBe(true)
+  })
+})
+
+describe("a build that fails at defineModel is built on first use (review round 4)", () => {
+  it("a view's time-series model whose probe failed is created as one by its first use", async () => {
+    const DBNAME = "mogobase_test_ts_retry"
+    const NAME = "ts_retry"
+    const { db: raw, client } = await connectTestMongo(DBNAME)
+    await raw.dropDatabase()
+    const realList = Db.prototype.listCollections
+    let failed = false
+    const probe = vi.spyOn(Db.prototype, "listCollections").mockImplementation(function (this: Db, ...a: any[]) {
+      if (!failed && this.databaseName === DBNAME) {
+        failed = true
+        return { toArray: async () => { throw Object.assign(new Error("not primary"), { code: 10107 }) } } as any
+      }
+      return (realList as any).apply(this, a)
+    })
+    try {
+      await expect(DB.useDatabase(DBNAME).defineModel(NAME, undefined, undefined, { timeField: "ts" })).rejects.toThrow(/not primary/)
+    } finally {
+      probe.mockRestore()
+    }
+    // Later uses build again, since the failed build was unmarked (at most once a second while
+    // its retry is pending: requests keep coming, as they would).
+    await vi.waitFor(
+      async () => {
+        DB.useDatabase(DBNAME).model(NAME)
+        const [found] = await raw.listCollections({ name: NAME }).toArray()
+        expect(found?.type).toBe("timeseries")
+      },
+      { timeout: 4000, interval: 100 }
+    )
+    await raw.dropDatabase()
+    await client.close()
+  })
+})
+
+describe("the default database: a failed build is built again (review round 7)", () => {
+  it("a time-series probe that fails for the cluster's sake is retried, and the collection made a time-series one", async () => {
+    const NAME = "ts_default_retry"
+    try { await DB.db.dropCollection(NAME) } catch {}
+    // On the instance: an earlier test's instance spy, once restored, shadows the prototype.
+    const realList = DB.db.listCollections
+    let failed = false
+    const probe = vi.spyOn(DB.db, "listCollections").mockImplementation(function (this: Db, filter?: any, ...a: any[]) {
+      if (!failed && filter?.name === NAME) {
+        failed = true
+        return { toArray: async () => { throw Object.assign(new Error("not primary"), { code: 10107 }) } } as any
+      }
+      return (realList as any).call(this, filter, ...a)
+    })
+    ;(DB as any)._indexRetryDelaysMs = [30]
+    try {
+      await expect(DB.defineModel(NAME, undefined, undefined, { timeField: "ts" })).rejects.toThrow(/not primary/)
+      await vi.waitFor(async () => {
+        const [found] = await DB.db.listCollections({ name: NAME }).toArray()
+        expect(found?.type).toBe("timeseries")
+      })
+    } finally {
+      probe.mockRestore()
+      ;(DB as any)._indexRetryDelaysMs = undefined
+      try { await DB.db.dropCollection(NAME) } catch {}
+    }
+  })
+
+  it("connecting again after disconnect() builds the registered models again", async () => {
+    const NAME = "ts_reconnect_rebuilt"
+    defineModel(NAME, undefined, { indexSpecs: [{ key: { k: 1 }, name: "k_1" }] })
+    await vi.waitFor(async () => expect((await DB.db.collection(NAME).listIndexes().toArray()).map((i) => i.name)).toContain("k_1"))
+    await DB.db.dropCollection(NAME) // its indexes are gone…
+    await DB.disconnect()
+    await DB.connect() // …and come back with the next connection
+    await vi.waitFor(async () => expect((await DB.db.collection(NAME).listIndexes().toArray()).map((i) => i.name)).toContain("k_1"))
   })
 })

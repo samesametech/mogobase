@@ -121,3 +121,127 @@ describe("getPath / deepEqual", () => {
     expect(deepEqual({ a: 1 }, { a: 1, b: 2 })).toBe(false)
   })
 })
+
+describe("filterMatcher: review round 10", () => {
+  it("compares Dates and BSON values by value, not as key-less objects", async () => {
+    const { ObjectId } = await import("mongodb")
+    const day = new Date("2026-01-01")
+    expect(matches({ day: new Date("2026-01-01") }, { day })).toBe(true)
+    expect(matches({ day: new Date("2026-02-01") }, { day })).toBe(false)
+    expect(matches({ day: new Date("2026-02-01") }, { day: { $ne: day } })).toBe(true)
+    expect(matches({ day: new Date("2026-02-01") }, { day: { $in: [day] } })).toBe(false)
+    const a = new ObjectId()
+    const b = new ObjectId()
+    expect(matches({ ownerId: new ObjectId(a.toHexString()) }, { ownerId: a })).toBe(true)
+    expect(matches({ ownerId: b }, { ownerId: a })).toBe(false) // another owner's row
+    expect(matches({ ownerId: b }, { ownerId: { $nin: [a] } })).toBe(true)
+  })
+
+  it("supports $nor, so a filter with one stays on the shared stream", async () => {
+    const { isSupportedFilter } = await import("@/runtime/filterMatcher")
+    expect(matches({ a: 1 }, { $nor: [{ a: 2 }, { b: 1 }] })).toBe(true)
+    expect(matches({ a: 2 }, { $nor: [{ a: 2 }, { b: 1 }] })).toBe(false)
+    expect(isSupportedFilter({ $nor: [{ a: 1 }] })).toBe(true)
+  })
+})
+
+describe("filterMatcher: review round 14", () => {
+  it("a $regex JavaScript cannot compile is not run by the matcher (MongoDB runs it, on a stream of its own)", async () => {
+    const { unsupportedOperator, matches } = await import("@/runtime/filterMatcher")
+    expect(unsupportedOperator({ name: { $regex: "a b", $options: "x" } })).toBe("$regex") // no x flag in JS
+    expect(unsupportedOperator({ name: { $regex: "(?i)bob" } })).toBe("$regex") // PCRE inline flag
+    expect(unsupportedOperator({ name: { $regex: "^bob", $options: "i" } })).toBeUndefined()
+    expect(unsupportedOperator({ name: { $regex: /^bob/, $options: "i" } })).toBeUndefined()
+    // Evaluated anyway (an offline query), it matches nothing instead of throwing.
+    expect(() => matches({ name: "ab" }, { name: { $regex: "a b", $options: "x" } })).not.toThrow()
+  })
+})
+
+describe("filterMatcher: review round 15", () => {
+  // The offline WatermelonDB store holds a v.decimal128() field as its decimal string; on the
+  // server the same field is a Decimal128. Round 14's type bracketing made { amount: { $gt: 10 } }
+  // miss "12.50" offline, where it matched on the server: the same handler answered differently.
+  it("numericStrings (the offline adapter's): a decimal string compares with a number by value", async () => {
+    const { matches } = await import("@/runtime/filterMatcher")
+    const offline = { numericStrings: true }
+    expect(matches({ amount: "12.50" }, { amount: { $gt: 10 } }, offline)).toBe(true)
+    expect(matches({ amount: "12.50" }, { amount: { $lte: 12.5 } }, offline)).toBe(true)
+    expect(matches({ amount: "12.50" }, { amount: 12.5 }, offline)).toBe(true)
+    expect(matches({ amount: "12.50" }, { amount: { $in: [12.5] } }, offline)).toBe(true)
+    // …and nothing else loosens: null and booleans stay out of ranges, strings compare as strings.
+    expect(matches({ amount: null }, { amount: { $lt: 10 } }, offline)).toBe(false)
+    expect(matches({ amount: false }, { amount: { $gte: 0 } }, offline)).toBe(false)
+    expect(matches({ code: "007" }, { code: "7" }, offline)).toBe(false)
+    expect(matches({ name: "abc" }, { name: { $gt: 5 } }, offline)).toBe(false)
+    // Without it (the shared stream, matching MongoDB): a string is not a number.
+    expect(matches({ amount: "12.50" }, { amount: { $gt: 10 } })).toBe(false)
+  })
+
+  it("$gt / $lt null match nothing; $gte / $lte null match null or missing (MongoDB's)", async () => {
+    const { matches } = await import("@/runtime/filterMatcher")
+    expect(matches({ score: 5 }, { score: { $gt: null } })).toBe(false) // JavaScript: 5 > null
+    expect(matches({ score: -5 }, { score: { $lt: null } })).toBe(false)
+    expect(matches({ score: null }, { score: { $gte: null } })).toBe(true)
+    expect(matches({}, { score: { $lte: null } })).toBe(true)
+    expect(matches({ score: 0 }, { score: { $gte: null } })).toBe(false) // JavaScript: 0 >= null
+  })
+})
+
+describe("filterMatcher: review round 16", () => {
+  it("numericStrings as a set of paths loosens only those fields", async () => {
+    const { matches } = await import("@/runtime/filterMatcher")
+    const offline = { numericStrings: new Set(["amount", "lines.total"]) }
+    expect(matches({ amount: "12.50" }, { amount: { $gt: 10 } }, offline)).toBe(true)
+    expect(matches({ lines: [{ total: "7.5" }] }, { "lines.total": 7.5 }, offline)).toBe(true)
+    expect(matches({ zip: "02134" }, { zip: 2134 }, offline)).toBe(false)
+    expect(matches({ zip: "02134" }, { $or: [{ zip: 2134 }, { amount: { $gt: 100 } }] }, offline)).toBe(false)
+  })
+
+  it("decimal128Paths lists a schema's decimal fields, nested and in arrays", async () => {
+    const { decimal128Paths } = await import("@/runtime/decimal")
+    const { v } = await import("@/server/handlers")
+    const shape = {
+      amount: v.decimal128(),
+      zip: v.string(),
+      meta: v.object({ price: v.decimal128().optional() }),
+      lines: v.array(v.object({ total: v.decimal128() })),
+      rates: v.array(v.decimal128()),
+    }
+    expect(decimal128Paths(shape).sort()).toEqual(["amount", "lines.total", "meta.price", "rates"])
+    expect(decimal128Paths(v.object(shape)).sort()).toEqual(["amount", "lines.total", "meta.price", "rates"])
+    expect(decimal128Paths(undefined)).toEqual([])
+  })
+})
+
+describe("filterMatcher: review round F3", () => {
+  it("$options without $regex is not a filter the hub runs, and matches nothing (MongoDB refuses it)", async () => {
+    const { unsupportedOperator, matches } = await import("@/runtime/filterMatcher")
+    expect(unsupportedOperator({ name: { $options: "i" } })).toBe("$options")
+    expect(matches({ name: "x" }, { name: { $options: "i" } })).toBe(false) // matched every row
+  })
+
+  it("a non-array $and / $or / $nor is MongoDB's error, not a TypeError (the offline adapter calls matches directly)", async () => {
+    const { matches } = await import("@/runtime/filterMatcher")
+    expect(() => matches({ a: 1 }, { $or: { a: 1 } } as any)).toThrow(/\$or must be an array/)
+    expect(() => matches({ a: 1 }, { $and: "x" } as any)).toThrow(/\$and must be an array/)
+  })
+})
+
+describe("filterMatcher: review round F6", () => {
+  it("an empty $and / $or / $nor is MongoDB's error, not every row or none", async () => {
+    const { matches, unsupportedOperator } = await import("@/runtime/filterMatcher")
+    expect(() => matches({ a: 1 }, { $or: [] })).toThrow(/\$or must be a nonempty array/)
+    expect(() => matches({ a: 1 }, { $and: [] })).toThrow(/\$and must be a nonempty array/)
+    expect(unsupportedOperator({ $nor: [] })).toBe("$nor")
+  })
+})
+
+describe("filterMatcher: review round F8", () => {
+  it("two RegExps are equal only with the same source and flags (they have no keys to compare)", async () => {
+    const { deepEqual, matches } = await import("@/runtime/filterMatcher")
+    expect(deepEqual(/^a/, /^b/)).toBe(false)
+    expect(deepEqual(/^a/i, /^a/)).toBe(false)
+    expect(deepEqual(/^a/i, /^a/i)).toBe(true)
+    expect(matches({ pattern: /^a/ }, { pattern: { $ne: /^b/ } } as any)).toBe(true) // was: every regex equal
+  })
+})

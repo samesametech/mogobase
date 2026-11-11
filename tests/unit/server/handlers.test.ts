@@ -1,5 +1,5 @@
 // tests/unit/server/handlers.test.ts
-import { describe, it, expect, beforeEach } from "vitest"
+import { describe, it, expect, beforeEach, vi } from "vitest"
 import handlers, {
   query,
   mutation,
@@ -74,6 +74,60 @@ describe("arg validation", () => {
     const res = await runQuery("nullable", {}, { db: fakeDb })
     expect(res).toBe(7)
   })
+
+  // A refusal used to keep only issues[0].message, so a client learned what was
+  // wrong but never which field ("Invalid args: Invalid input: expected string,
+  // received undefined"), and an app could not tell a missing field from a bad one.
+  const createCustomer = () =>
+    mutation("createCustomer", {
+      args: v.object({
+        customer: v.object({ email: v.string() }),
+        items: v.array(v.object({ price: v.number() })),
+      }),
+      handler: async () => 1,
+    })
+
+  it("names the field in the message, and puts the structured issues on the error", async () => {
+    createCustomer()
+    const err: any = await runMutation("createCustomer", { customer: {}, items: [] }, { db: fakeDb }).catch((e) => e)
+    expect(err.message).toBe("Invalid args: customer.email: Invalid input: expected string, received undefined")
+    expect(err.issues).toEqual([
+      { path: ["customer", "email"], code: "invalid_type", message: "Invalid input: expected string, received undefined" },
+    ])
+  })
+
+  it("lists every issue, the first one first", async () => {
+    createCustomer()
+    const err: any = await runMutation("createCustomer", { items: [{ price: "9" }] }, { db: fakeDb }).catch((e) => e)
+    expect(err.message).toBe(
+      "Invalid args: customer: Invalid input: expected object, received undefined; " +
+        "items.0.price: Invalid input: expected number, received string"
+    )
+    expect(err.issues.map((i: any) => i.path)).toEqual([["customer"], ["items", 0, "price"]])
+  })
+
+  it("an issue with the args as a whole reads as it always did", async () => {
+    query("whole", { args: v.object({ id: v.string() }), handler: async () => 1 })
+    const err: any = await runQuery("whole", "not-an-object", { db: fakeDb }).catch((e) => e)
+    expect(err.message).toBe("Invalid args: Invalid input: expected object, received string")
+    expect(err.issues).toEqual([{ path: [], code: "invalid_type", message: "Invalid input: expected object, received string" }])
+  })
+
+  it("stays a plain Error, so the HTTP route's `${error}` body keeps its prefix", async () => {
+    query("strictQ", { args: v.object({ id: v.string() }), handler: async () => 1 })
+    const err: any = await runQuery("strictQ", {}, { db: fakeDb }).catch((e) => e)
+    expect(err.name).toBe("Error")
+    expect(`${err}`).toBe("Error: Invalid args: id: Invalid input: expected string, received undefined")
+  })
+
+  it("lists at most 10 issues in the message, and keeps every one on `issues`", async () => {
+    query("manyItems", { args: v.object({ items: v.array(v.number()) }), handler: async () => 1 })
+    const err: any = await runQuery("manyItems", { items: Array.from({ length: 25 }, (_, i) => `x${i}`) }, { db: fakeDb }).catch((e) => e)
+    expect(err.message.startsWith("Invalid args: items.0: Invalid input: expected number, received string; ")).toBe(true)
+    expect(err.message.match(/items\.\d+:/g)).toHaveLength(10)
+    expect(err.message.endsWith("; …and 15 more")).toBe(true)
+    expect(err.issues).toHaveLength(25)
+  })
 })
 
 describe("internal handlers and prefix routing", () => {
@@ -112,6 +166,28 @@ describe("internal handlers and prefix routing", () => {
   it("public runMutation does NOT resolve internal handlers", async () => {
     internalMutation("doThing", { args: v.object({}), handler: async () => "private" })
     await expect(runMutation("internal.doThing", {}, { db: fakeDb })).rejects.toThrow(/not found/)
+  })
+})
+
+describe("internal handler registration (review round F11)", () => {
+  beforeEach(() => resetHandlers())
+
+  // The duplicate check looked up the bare name in a map keyed `internal.<name>`, so it never
+  // fired: a second internalQuery("recalc") silently replaced the first, and runInternalQuery ran
+  // whichever module loaded last. It now says so. It still replaces (as it did), so an app with a
+  // duplicate keeps booting — the public query()/mutation() throw, as they always have.
+  it("a second internalQuery or internalMutation of one name is reported", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    internalQuery("recalc", { args: v.object({}), handler: async () => 1 })
+    internalQuery("recalc", { args: v.object({}), handler: async () => 2 })
+    internalMutation("settle", { args: v.object({}), handler: async () => 1 })
+    internalMutation("settle", { args: v.object({}), handler: async () => 2 })
+    expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+      expect.stringMatching(/internalQuery "recalc" is registered twice/),
+      expect.stringMatching(/internalMutation "settle" is registered twice/),
+    ])
+    expect(await runInternalQuery("internal.recalc", {}, { db: fakeDb })).toBe(2)
+    warn.mockRestore()
   })
 })
 

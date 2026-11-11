@@ -22,6 +22,11 @@ export const DECIMAL128_BRAND = Symbol.for("mogobase.decimal128")
 // No exponent form (BSON Decimal128 stores it; we keep the wire form plain).
 const DECIMAL_RE = /^-?\d+(\.\d+)?$/
 
+/** Whether `value` is a canonical decimal string — the form a `v.decimal128()` field holds. */
+export function isDecimalString(value: unknown): value is string {
+  return typeof value === "string" && DECIMAL_RE.test(value)
+}
+
 // A branded zod string validating a canonical decimal string. The brand is
 // attached to the returned instance; `.optional()`/`.nullable()` wrap it
 // without copying the inner instance, so the brand survives (see
@@ -193,4 +198,27 @@ export function decodeDecimal128Deep(value: any): any {
     }
   }
   return value
+}
+
+/**
+ * The dotted paths of a schema's `v.decimal128()` fields — through nested objects, and through
+ * arrays (an array of objects continues into its elements, as a MongoDB path does; an array of
+ * decimals is its own path). Takes a zod object or a plain `{ field: schema }` shape, as
+ * defineModel does. For the offline WatermelonDB adapter, which compares exactly these fields
+ * with numbers by value (the server holds them as Decimal128).
+ */
+export function decimal128Paths(schema: any, prefix = ""): string[] {
+  if (!schema || typeof schema !== "object") return []
+  if (isDecimal128Schema(schema)) return prefix ? [prefix] : []
+  const shape = objectShape(schema) ?? (isPlainShape(schema) ? schema : undefined)
+  if (shape) {
+    return Object.keys(shape).flatMap((key) => decimal128Paths(shape[key], prefix ? `${prefix}.${key}` : key))
+  }
+  const el = arrayElement(schema)
+  return el ? decimal128Paths(el, prefix) : []
+}
+
+// A plain `{ field: zodSchema }` object (not a zod schema itself).
+function isPlainShape(value: any): boolean {
+  return !!value && typeof value === "object" && !value._def && !Array.isArray(value)
 }

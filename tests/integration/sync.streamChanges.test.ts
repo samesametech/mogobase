@@ -47,3 +47,21 @@ describe("streamChanges", () => {
     expect(b).toContain("events_stream")
   })
 })
+
+describe("streamChanges: a filter and a pipeline both narrow (review round 7)", () => {
+  it("the policy filter is kept when a pipeline is given too", async () => {
+    const events: string[] = []
+    const unsub = streamChanges([{ model: "events_stream", filter: { userId: "alice" }, pipeline: [{ $match: { operationType: "insert" } }] }], (m) =>
+      events.push(m)
+    )
+    await new Promise((r) => setTimeout(r, 500))
+    const stamps = { createdAt: Date.now(), updatedAt: Date.now(), deletedAt: null }
+    await DB.model("events_stream").insertOne({ _id: "bob" as any, userId: "bob", ...stamps })
+    await new Promise((r) => setTimeout(r, 400))
+    expect(events).toEqual([])
+    await DB.model("events_stream").insertOne({ _id: "alice" as any, userId: "alice", ...stamps })
+    await new Promise((r) => setTimeout(r, 400))
+    unsub()
+    expect(events).toEqual(["events_stream"])
+  })
+})
