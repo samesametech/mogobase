@@ -12,7 +12,8 @@ Follow this workflow:
    - Add missing env vars (\`MONGO_URI\`, \`MONGO_DB\`) to \`.env.local\` (ask me for values if you don't know them).
    - Create or edit a client component that renders \`<MogobaseProvider>\` and mount it in \`app/layout.tsx\`.
 4. If I ask for a handler or model, read the matching guide (\`mogobase://guide/handlers\`, \`mogobase://guide/models\`) before writing code.
-5. Always import handler code from \`"mogobase/runtime"\` — never \`"mogobase/server"\`.
+5. Before setting any mogobase option (attachMogobaseWebSocket's, defineModel's, the sync engine's), read \`mogobase://guide/configuration\`: it lists every default and how to choose values for this project's shape — propose the few that should differ, with the reason.
+6. Always import handler code from \`"mogobase/runtime"\` — never \`"mogobase/server"\`.
 
 Start by calling \`mogobase_check_setup\`.`
 

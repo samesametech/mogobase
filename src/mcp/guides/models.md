@@ -124,6 +124,16 @@ An aggregation-pipeline update (`[{ $set: … }]`) gets `updatedAt` appended as 
 final stage. Its upsert branch is MongoDB's own and cannot be stamped from here,
 so pass an operator update if you need the birth stamps.
 
+**Your own object is stamped too.** After a successful `insertOne` /
+`insertMany`, the document you passed carries the same `createdAt`, `updatedAt`
+and `deletedAt` the stored row has, plus the `_id` the driver generated if you
+set none — so a handler can return or emit what it just inserted without
+reading it back. A write that fails, or that `dbValidation` refuses, leaves your
+object as it was. Decimal fields on your object stay strings. `bulkWrite` stamps
+what it stores but does not write back onto your op documents.
+
+Because the write-back changes the object you passed, two patterns need care. **Passing it on:** inserting a handler's `args` directly adds `_id` / `createdAt` / `updatedAt` / `deletedAt` to `args` itself, so passing `args` on afterwards (to `ctx.runMutation`, or to a `.strict()` schema) carries those keys too — insert `{ ...args }` instead. **Copying it:** a copy made AFTER the insert (`{ ...row }`, `structuredClone(row)`) carries the stored `_id` and stamps like any other field, exactly as with the plain driver's `_id` — insert it elsewhere and it keeps that `_id` (a duplicate-key error in the same collection) and those stamps. To insert a fresh copy, leave them out: `const { _id, createdAt, updatedAt, deletedAt, ...fresh } = row`. Re-inserting the **same object** is fine: mogobase remembers what it wrote onto that object, so a later insert of it gets a fresh `_id` and fresh stamps (as every insert did before the write-back), while any value you set or changed yourself is kept.
+
 Storing the real numeric BSON type (not a string) is what makes server-side
 numeric comparison/aggregation correct: `amount_gt`, `$gte`, `$sum`, `$avg`,
 and cross-numeric-type matches all work, with none of the lexicographic
@@ -144,6 +154,70 @@ defineModel("events", v.object({ userId: v.string(), at: v.number(), type: v.str
   ],
 })
 ```
+
+A model may be defined in more than one file (an online and an offline handler file, or a sync file adding `sync: true`). Each option comes from the latest definition that sets it, except `indexSpecs`, which add up: every distinct spec any definition declares is built (one index spelled two ways — with and without its generated name, or with `background` — counts once). Removing a spec from one file therefore does not stop it being built while another file still declares it. Two definitions giving one index name to two keys are warned about at registration; any other pair MongoDB refuses is reported by `DB.onIndexError` when the build runs.
+
+### The engine's stamp indexes
+
+By default mogobase also builds `mogobase_updatedAt_1`, `mogobase_deletedAt_1` and `mogobase_createdAt_1` on every collection (none on a time-series one). Turn off the ones a model's queries never use — each is paid for on every write:
+
+```ts
+defineModel("payments", schema, { stampIndexes: { createdAt: false, deletedAt: false } }) // keep updatedAt
+defineModel("audit_log", schema, { stampIndexes: false })                                  // none
+```
+
+A sync model needs `updatedAt` (every pull filters and sorts on it); `defineModel` warns if a sync model turns it off.
+
+### Which databases a model lives in
+
+In a multi-database app — an identity database beside per-mode or per-tenant ones, picked per request with `DB.setRequestResolver` — mogobase used to build every model's indexes in the default database at `defineModel`, and in any other database the first time a request touched the model there. A model that never lives in a database still got an empty "shadow" collection there, with all its indexes. Say where each model lives, and its indexes are built only there:
+
+```ts
+defineModel("members", schema, { databases: ["identity"] })                   // built in "identity" at defineModel
+defineModel("payments", schema, { databases: (db) => db.startsWith("mode_") }) // built in each mode database on first use
+
+// Or once, app-wide, BEFORE DB.connect() — a model's own `databases` wins over it:
+DB.setModelDatabases((model, dbName) => (SHARED.includes(model) ? dbName === "identity" : dbName !== "identity"))
+```
+
+Return `null` / `undefined` from the app-wide rule for "no opinion" (every database). Nothing is dropped: a shadow collection an older version left behind stays, and `DB.diffIndexes(model, { dbName })` in a database the model does not live in lists every index there as `undeclared`. A live query's `ctx.watch(model)` on a model with a one-entry `databases` list listens in that database, whatever the request resolved to (the handler reads it with `ctx.useDatabase(name)`). For a model placed by `DB.setModelDatabases` or a predicate, name the database on the watch: `ctx.watch(model, filter, { dbName })`.
+
+### Dropping indexes a model no longer declares
+
+mogobase builds indexes but **never drops one by itself**. Turning a stamp index off, or removing a spec from `indexSpecs`, leaves the existing index in place. To see and remove them, call these from a migration:
+
+```ts
+import DB from "mogobase/db"
+
+const diff = await DB.diffIndexes("payments", { dbName: "live" }) // read-only
+// diff.missing      declared, not in the database (a build that failed or has not run)
+// diff.conflicting  on a declared key, with other options (unique / TTL / partial / name) — not in force
+// diff.undeclared   in the database, declared by nothing
+
+await DB.dropUndeclaredIndexes("payments", { dbName: "live", dryRun: true })        // → { dropped: [...names] }, nothing dropped
+await DB.dropUndeclaredIndexes("payments", { dbName: "live", keep: ["search_text"] }) // drops the rest
+```
+
+`undeclared` includes **every** index mogobase does not declare — also ones your app created by hand, in a migration, or as a TTL outside the model. **Always run with `dryRun: true` first**, read the list, and pass every index built outside the model in `keep`. Indexes match by key (fields, order, direction), not name; conflicting ones are never dropped. Every undeclared index is tried: one already gone is skipped, and if any other drop fails the call throws after trying the rest, with `dropped` and `failed` on the error. `dbName` defaults to the default database. In a database the model does not live in (see "Which databases a model lives in" above) nothing is declared, so every index there is undeclared; a real drop there is refused unless you pass `shadow: true` after checking the dry run.
+
+### When an index build fails
+
+A failed build is no longer just a console warning. MongoDB fails a multi-index build as a whole, so mogobase retries a failed batch one spec at a time: one bad spec (a TTL changed over an existing index, a unique index over duplicate values) no longer keeps the model's other indexes from being built. Each spec that still fails is reported:
+
+```ts
+DB.onIndexError(({ model, dbName, spec, error }) => {
+  alertOps(`Index on ${model} in ${dbName} not built: ${JSON.stringify(spec.key)} — ${error}`)
+}) // returns an unsubscribe; the warning is still logged
+```
+
+`specs` lists everything the failure left unbuilt: just `[spec]` when MongoDB refused that spec, or the whole batch when the failure was the cluster's (no primary, a lost connection, no privilege). A cluster failure is reported once, then retried on a backoff (15 s, 30 s, 1, 2 and 4 min): an index build that ran during an election is built once a primary is back, without a restart. It is reported a second time only if every retry fails. Register it before `DB.connect()` to hear the builds that run at boot. To check what is in force at any time — declared vs actual, for every model in every database it lives in:
+
+```ts
+const report = await DB.indexReport() // or { dbNames: [...], models: [...] }
+for (const r of report) if (r.missing.length || r.conflicting.length) console.log(r.model, r.dbName, r.missing, r.conflicting)
+```
+
+Each entry is a `diffIndexes` result plus `exists` (`false` for a collection not created yet: its indexes are built on first use). Databases default to the default one, every database mogobase has built a model in, and every database a `databases` list names.
 
 ## defineModel options
 
@@ -172,7 +246,9 @@ defineModel(
 
 | Option                                                   | Effect                                                                                                                                                                                                                                                                             |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `indexSpecs`                                             | Passed to MongoDB's `createIndexes`. The engine always adds `updatedAt`, `deletedAt`, `createdAt` indexes on top of yours — sync depends on them.                                                                                                                                  |
+| `indexSpecs`                                             | Passed to MongoDB's `createIndexes`. The engine adds `updatedAt`, `deletedAt`, `createdAt` indexes on top of yours unless `stampIndexes` says otherwise.                                                                                                                         |
+| `stampIndexes: false \| { createdAt?, updatedAt?, deletedAt? }` | Which of the engine's three stamp indexes to build. Default all three; `false` builds none; `{ createdAt: false }` skips one. Existing indexes are not dropped — see `DB.dropUndeclaredIndexes`. A sync model needs `updatedAt`.                                     |
+| `databases: string[] \| (dbName) => boolean`            | The database(s) the model lives in. Its indexes (and a time-series collection) are built only there — a list eagerly at `defineModel`, a predicate on first use. Default: every database it is used in. App-wide rule: `DB.setModelDatabases(...)`, which a model's own setting overrides. See "Which databases a model lives in". |
 | `clientFields: string[]`                                 | Allowlist of fields shipped to / accepted from clients. Engine fields (`_id`, `createdAt`, `updatedAt`, `deletedAt`) are always included. Used by both `filterClientFields()` (online flow) and the sync engine (pull projection + push allowlist). Omit for no restriction.       |
 | `sync: true`                                             | Opt the model into mogobase sync. Default-deny — pull/push/watch on a model without `sync: true` throws. Independent from `clientFields`.                                                                                                                                          |
 | `dbValidation: true`                                     | Validate writes against the model's zod schema at the autoStamp layer. Inserts and full-replace updates are validated as full docs; `$set` / `$setOnInsert` are validated as partials; aggregation-pipeline updates are skipped. Default `false`. See "Database validation" below. |
@@ -222,9 +298,9 @@ Validation errors throw a single `Error` with a stable prefix:
 [mogobase] Validation failed for posts.insertOne: title: Invalid input: expected string, received number; userId: Invalid input: expected string, received undefined
 ```
 
-Inside a handler this surfaces as a normal rejected mutation — the WS frame
-returns a `MutationResult` with the error message, and the offline backends
-treat it as a write failure.
+Inside a handler this surfaces as a normal rejected mutation — `POST /api/handlers`
+(where `useMutation` sends mutations) answers with the error message, and the
+offline backends treat it as a write failure.
 
 When to turn it on:
 
@@ -386,6 +462,8 @@ query("listPostsWithAuthors", {
 ```
 
 Create the loader **outside** the handler (module scope) so batching works across requests. Or use a per-request loader if the user scopes matter.
+
+Ids may be strings (prefixed ULIDs such as `usr_01H…`), ObjectIds, or 24-hex strings. A 24-hex string is looked up both as an ObjectId and as the string itself; if a collection holds both, the ObjectId row wins. It reads through `DB.model(model)` — the default database, without a request's resolver. Set `MOGOBASE_DEBUG=1` to log each batch.
 
 ## Offline caveats
 

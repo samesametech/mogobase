@@ -5,7 +5,7 @@ A lightweight backend runtime for Next.js apps backed by MongoDB, with reactive 
 Source: [github.com/samesametech/mogobase](https://github.com/samesametech/mogobase) · npm: [`mogobase`](https://www.npmjs.com/package/mogobase)
 
 - **Typed handlers** — define `query()` / `mutation()` with zod-validated args. Opt into a second validation layer at the storage boundary by setting `dbValidation: true` on `defineModel`.
-- **Reactive queries** — `useQuery` and `usePaginatedQuery` both re-run their handlers on MongoDB change stream events. For `usePaginatedQuery` the server reuses the currently-loaded window as the effective limit so scroll position is preserved across refetches, and enrichments from joined collections (watched with additional `ctx.watch` calls) stay fresh.
+- **Reactive queries** — `useQuery` and `usePaginatedQuery` both re-run their handlers on MongoDB change stream events. For `usePaginatedQuery` the server re-reads the currently-loaded window (in pages of at most 300, the pager's limit; up to `maxRerunRows`, default 1000 — past it the list shrinks to the cap with `hasNext: true`) so scroll position is preserved across refetches, and enrichments from joined collections (watched with additional `ctx.watch` calls) stay fresh.
 - **Offline mode is opt-in** — same handlers run in the browser against RxDB/IndexedDB or WatermelonDB/LokiJS. The consumer imports the backend they want and passes it as `<MogobaseProvider clientDB={…}>`. Online-only apps install neither offline package — `rxdb` and `@nozbe/watermelondb` are both optional peer dependencies. Both backends sync writes across same-origin tabs via BroadcastChannel.
 - **Local-first sync is opt-in** — turn on `sync={true}` and the same hooks read/write through `clientDB` while a background engine continuously replicates with MongoDB over the existing `/ws` connection. Writes pushed up; server changes streamed down; offline writes queue locally and replay when the WS reconnects.
 - **Sync security is built in** — default-deny model allowlist (`sync: true` per model), `clientFields` projection (server-only fields never reach the client; clients can't write outside the allowlist), per-op `SyncPolicy` callback for allow/filter/transform with the request headers, server-owned timestamps, and a 500-row push batch cap.
@@ -116,7 +116,8 @@ Use `internalQuery()` / `internalMutation()` for handlers that should only be ca
 
 `defineModel(name, schema?, options?)` registers a model for both MongoDB (creates the collection, applies indexes) and RxDB (uses the Zod schema to derive a JSON schema). A schema is required for offline mode. Useful options:
 
-- `indexSpecs` — passed to `createIndexes`. The engine always adds `updatedAt`, `deletedAt`, `createdAt` indexes (sync depends on them) on top of yours.
+- `indexSpecs` — passed to `createIndexes`. The engine adds `updatedAt`, `deletedAt`, `createdAt` indexes (sync depends on `updatedAt`) on top of yours.
+- `stampIndexes: false | { createdAt?: false, updatedAt?: false, deletedAt?: false }` — skip some or all of those three engine indexes. Nothing is dropped automatically: `DB.diffIndexes(model, { dbName })` lists missing / conflicting / undeclared indexes, and `DB.dropUndeclaredIndexes(model, { dbName, dryRun, keep, shadow })` drops the undeclared ones when a migration calls it (`shadow: true` is required in a database the model does not live in).
 - `clientFields: string[]` — visibility allowlist. Used by `filterClientFields(model, doc)` (online flow) and the sync engine (pull projection + push allowlist). Engine fields (`_id`, `createdAt`, `updatedAt`, `deletedAt`) are always included. Omit for no restriction.
 - `sync: true` — opt the model into mogobase sync. Default-deny: pull/push/watch on a model without `sync: true` throws.
 - `dbValidation: true` — validate writes against the model's zod schema at the autoStamp layer. When set, `insertOne` / `insertMany` / `updateOne` / `updateMany` / `findOneAndUpdate` are checked before reaching MongoDB; type mismatches and missing required fields throw `[mogobase] Validation failed for <model>.<op>: <path: msg; …>`. `$set` / `$setOnInsert` payloads are validated as partials; aggregation-pipeline updates are skipped. Default `false`.
@@ -206,7 +207,7 @@ What you get:
 - Reads are instant (served from IndexedDB / LokiJS).
 - Writes don't wait for the network — they replay automatically when the WS reconnects.
 - Server changes from other clients land within ~3s via a `sync-stream` event that re-pulls.
-- `createdAt` / `updatedAt` / `deletedAt` are auto-injected into every model schema and auto-stamped on every write — handler authors don't have to declare or update them. Timestamps are numeric ms (`Date.now()`). Server timestamps **always override** client values; the client clock is only consulted for conflict ordering.
+- `createdAt` / `updatedAt` / `deletedAt` are auto-injected into every model schema and auto-stamped on every write — handler authors don't have to declare or update them. Timestamps are numeric ms (`Date.now()`). Server timestamps **always override** client values; the client clock is only consulted for conflict ordering. After a successful `insertOne` / `insertMany`, the object you passed carries the stored stamps (and the generated `_id`), so a handler can return what it just inserted without reading it back.
 - Soft-deletes propagate (`deleteOne` is rewritten to `$set: {deletedAt, updatedAt}` so the sync checkpoint can carry tombstones). Reach through to the underlying driver if you really need a hard delete.
 
 #### Securing sync (`SyncPolicy`)
@@ -341,7 +342,7 @@ attachMogobaseWebSocket(server, "/ws", {
 })
 ```
 
-Return a database name to redirect that model's stream, `null` / `undefined` to keep the default. The handler still has to read the collection from that database itself (`ctx.useDatabase(name)`); the option only decides where the watch listens.
+Return a database name to redirect that model's stream, `null` / `undefined` to keep the default. The handler still has to read the collection from that database itself (`ctx.useDatabase(name)`); the option only decides where the watch listens. A model declared with exactly one home (`defineModel(name, schema, { databases: ["identity"] })`) is watched in that home without this option, on both transports; `watchDatabaseFor` still wins when it returns a name. A predicate or several homes keep the request's database. Or name it on the watch itself — `ctx.watch(model, filter, { dbName: "identity" })` — the plainest way, and the only one for a model placed by `DB.setModelDatabases` or a predicate: an explicit `dbName` wins over everything else.
 
 ### Explicit `ctx.useDatabase` (no resolver)
 
@@ -402,6 +403,13 @@ query("recentEvents", {
 | `NEXT_MOGOBASE_URL`  | *(same-origin)*             | Override client WS/HTTP base URL             |
 | `MOGOBASE_URL`       | *(same-origin)*             | SSR override for the same                    |
 
+Every other option — `attachMogobaseWebSocket`'s (`maxSubscriptionsPerSocket` 32,
+`maxConcurrentRunsPerSocket` 4, `turnTimeoutMs` 5000, `maxRerunRows` 1000, `refetchDebounceMs`
+100, …), `defineModel`'s, `ctx.watch`'s, the `DB`'s and the client's — with its default and how to
+choose a value for a given project, is in the configuration guide: `mogobase://guide/configuration`
+(source `src/mcp/guides/configuration.md`). AI assistants using `mogobase mcp` are pointed to it
+before they set any option.
+
 ## Scaling
 
 mogobase uses a process-level shared change-stream hub (`src/server/streamHub.ts`)
@@ -417,6 +425,16 @@ backpressure. Configure with:
 ```ts
 attachMogobaseWebSocket(server, "/ws", { refetchDebounceMs: 100 })
 ```
+
+### One socket per tab (4.0.0)
+
+A WebSocket carries many live subscriptions: send each `query` / `paginated-query` with a
+client-chosen `sid`, route frames by their `sid`, and `{ type: "unsubscribe", sid }` when a
+component goes away. Messages without `sid` keep the one-subscription-per-socket behaviour of
+earlier versions. Limits: `maxSubscriptionsPerSocket` (default 32),
+`maxConcurrentRunsPerSocket` (default 4) and `turnTimeoutMs` (default 5000). Every option and
+its default is in `mogobase://guide/configuration`. Every message and frame is in the protocol guide
+(`mogobase://guide/protocol`, source `src/mcp/guides/protocol.md`).
 
 ### Practical capacity
 
@@ -434,7 +452,8 @@ MongoDB cluster (M30+):
 
 - **Per-process scope.** Horizontal scaling multiplies streams by node count.
   A Redis pub/sub layer would dedupe across processes; not built-in.
-- **Filter operators.** `streamHub` evaluates `$eq`/`$ne`/`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`/`$exists`/`$regex`/`$and`/`$or`/`$not` in JS. Operators outside this set (`$expr`, `$where`, `$elemMatch`, `$text`) throw at subscribe; callers can fall back to passing a `Document[]` aggregation pipeline to `ctx.watch()` for legacy per-socket pipeline filtering.
+- **Filter operators.** `streamHub` evaluates `$eq`/`$ne`/`$gt`/`$gte`/`$lt`/`$lte`/`$in`/`$nin`/`$exists`/`$regex`/`$and`/`$or`/`$nor`/`$not` in JS. A watch using any other operator (`$expr`, `$elemMatch`, …) gets a change stream of its own with the filter as its `$match`, evaluated by MongoDB; one using `$where`, `$text` or `$near`, which no change stream runs, watches its whole collection.
+- **Writes nobody needs.** `ctx.watch(model, filter, { ignoreFields: [...] })` skips updates that touched only those fields (a cron's stamps). `attachMogobaseWebSocket(server, "/ws", { serverSideWatchFilters: true })` pushes the subscribers' filters into each shared stream's `$match`, so changes no subscriber in the process matches are never sent to it (opt-in; the stream reopens from a resume token when the filter set changes). See `mogobase://guide/scaling`.
 - **Hot shared queries.** A query subscribed by N clients still triggers N refetch handler runs per debounce window. Result caching / request collapsing is not in this version.
 
 ## Package entry points

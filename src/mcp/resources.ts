@@ -16,6 +16,8 @@ const GUIDES: Guide[] = [
   { slug: "sync", title: "Sync Mode (Local-First)", description: "Enabling sync, wire protocol, updatedAt semantics, conflict resolution, limitations." },
   { slug: "troubleshooting", title: "Troubleshooting", description: "Common errors: WS not connecting, handlers not registering, offline gotchas." },
   { slug: "scaling", title: "Scaling and Performance", description: "Shared change-stream hub, refetch debounce, backpressure, capacity ceilings." },
+  { slug: "configuration", title: "Configuration Reference", description: "Every option, environment variable and default, and how to choose values for a project." },
+  { slug: "protocol", title: "WebSocket Protocol", description: "Every /ws message and frame: live queries, many subscriptions per socket (sid), unsubscribe, sync." },
 ]
 
 function guidesDir(): string {

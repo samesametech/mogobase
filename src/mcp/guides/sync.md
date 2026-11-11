@@ -152,7 +152,7 @@ Decision contract:
 type SyncPolicyContext = {
   op: "pull" | "push" | "watch"
   model: string
-  headers: any  // WHATWG Headers (HTTP) or Node IncomingMessage headers (WS)
+  headers: HeaderView  // one shape from every door (headerView): a Fetch Headers copy, plus plain lowercase keys
 }
 
 type SyncPolicyDecision = {
@@ -161,6 +161,8 @@ type SyncPolicyDecision = {
   transform?: (doc: any, existing: any | null) => any | Promise<any>
 }
 ```
+
+`headers` is the same object whichever transport the call came by — attachWs, the legacy `ws.ts`, `hono.ts`'s `/api/sync`, or the Next.js sync route template (which asks it through `evaluateSyncPolicy`, exported from `mogobase/server/sync` with `headerView`): read it as `headers["authorization"]` or `headers.get("authorization")`. It is a real `Headers` (a copy), so a library that wants one — an `instanceof Headers` check, `new Request(url, { headers })` — takes it as it is. An app route copied before 4.0.0 calls the policy itself with `request.headers` — replace `syncPolicy({ op, model, headers: request.headers })` with `evaluateSyncPolicy(syncPolicy, op, model, request.headers)` to give it the same shape, and a throwing policy the same logged 403.
 
 Behavior:
 
@@ -209,12 +211,23 @@ model, sync correctness breaks for clients with policy filters.
 ### Shared change streams
 
 `streamChanges` and the WebSocket sync-subscribe path both go through a
-process-level `streamHub` (`src/server/streamHub.ts`). One MongoDB change
-stream is opened per active model regardless of how many clients are
-subscribed; the policy `filter` returned by `syncPolicy({op:"watch",...})`
-is evaluated in JS via `runtime/filterMatcher` to decide which clients
-receive each event. This bounds MongoDB cursor count by *number of synced
-models*, not number of connected users.
+`streamHub` (`src/server/streamHub.ts`). One MongoDB change stream is opened
+per active (database, model) — sync always watches the default database —
+regardless of how many clients are subscribed; the policy `filter` returned by
+`syncPolicy({op:"watch",...})` is evaluated in JS via `runtime/filterMatcher`
+to decide which clients receive each event. This bounds MongoDB cursor count
+by *number of synced models*, not number of connected users — **except** for a
+policy filter the JS matcher cannot evaluate (`$elemMatch`, `$expr`, …): that
+model's stream is opened per subscribed client, each holding a pooled
+connection (logged once, naming the operator). Keep watch filters to the
+supported operators, and size `maxPoolSize` as the scaling guide describes.
+
+Only models declared `sync: true` stream — a `sync-subscribe` naming any other
+model (or a time-series one) is refused, like pull and push. The exported
+`streamChanges(specs, onEvent)` follows the same rule: for a model not declared
+`sync: true` it logs `Model "X" is not configured for sync` and streams nothing.
+Code that used it as a general change notifier on other collections should use
+`collection.watch()` (or declare the model `sync: true`, with a policy).
 
 ## Wire protocol
 
@@ -228,6 +241,18 @@ mogobase setup uses. Message types:
 { type: "SyncPullResult", model, documents: SyncDoc[], checkpoint }   // S→C
 { type: "sync-push",      model, rows: { assumedMasterState, newDocumentState }[] }  // C→S
 { type: "SyncPushResult", model, conflicts: SyncDoc[] }               // S→C
+```
+
+A pull answers the rows changed after `checkpoint` (a numeric `updatedAt`), oldest first, at most `batchSize` (capped at 1000) — except that a batch never ends inside a group of rows sharing one `updatedAt`: the rest of that group comes in the same answer, past `batchSize`. A soft `deleteMany` stamps every row it deletes with one `updatedAt`, and a batch cut inside the group lost the rest of it for good (the next pull asks for rows after the checkpoint). A client keeps pulling while an answer is full (`documents.length >= batchSize`); one that stops at exactly `batchSize` must use `>=`. So a soft `deleteMany` of 100 000 rows is one pull answer of 100 000 tombstones for every client — and a client that pulls while such a write is still being applied (one `updateMany` of many rows takes seconds) gets the rows written so far, a checkpoint at their stamp, and never the rest (main behaves the same; holding checkpoints back a few seconds would close it, at a cost to every pull — not in 4.0.0). Delete very large sets in chunks of a few thousand rows (by `_id` range), each chunk a separate `deleteMany`: each write is then short, and each pull answer small.
+
+Rows whose `updatedAt` is a Date (an import's, or a caller's `new Date()`), and rows with no `updatedAt` but a numeric `createdAt` (written before sync), are pulled in order with the rest. Rows a pull cannot page — a string `updatedAt`, a `createdAt` that is not a number with no `updatedAt`, or no timestamp at all — come only in a client's first pull, ahead of the rest and at most one batch of them: the server warns once per model (`<model> has rows sync cannot page`). Stamp them before enabling sync, with the time of the fix — stamped with their own old date, a client whose checkpoint is already past it would never pull them — in chunks, so no pull answer carries them all (MongoDB 4.2+):
+
+```js
+let ids
+do {
+  ids = db.todos.find({ updatedAt: { $not: { $type: "number" } } }, { _id: 1 }).limit(1000).toArray().map((d) => d._id)
+  db.todos.updateMany({ _id: { $in: ids } }, [{ $set: { updatedAt: { $toLong: "$$NOW" } } }])
+} while (ids.length)
 ```
 
 `SyncDoc` adds three sync-specific fields on top of your record:

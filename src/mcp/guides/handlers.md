@@ -12,7 +12,13 @@ NEVER import from `mogobase/server` in handler files. The `runtime` barrel is is
 
 ## Args validation
 
-`args` is a **zod v4** schema (re-exported as `v`). Args are validated via `safeParseAsync` before the handler runs. Throw-on-first-error — the first `.issues[0].message` is returned to the caller.
+`args` is a **zod v4** schema (re-exported as `v`). Args are validated via `safeParseAsync` before the handler runs. A refusal throws an `Error` whose message names the failing fields by their paths, the first issue first — at most 10, then `; …and N more`:
+
+```
+Invalid args: customer.email: Invalid input: expected string, received undefined; items.0.price: Invalid input: expected number, received string
+```
+
+An issue with the args as a whole (not an object at all) has no path: `Invalid args: Invalid input: expected object, received string`. The same issues are on the error as `issues: { path, code, message }[]` (type `InvalidArgsError` from `mogobase/server` or `mogobase/runtime`), so an app can map them to its own error codes — e.g. `code === "invalid_type"` on a path whose value is `undefined` is a missing field — without parsing the message. Only the message crosses the wire: the HTTP route and `/ws` send the text, not `issues`.
 
 ```ts
 import { query, v } from "mogobase/runtime"
@@ -43,7 +49,7 @@ The second parameter of every handler is `ctx` with these fields:
 | `db` | queries + mutations | The `MogobaseDB` (online) or `MogobaseClientDB` (offline) singleton. Use `db.model(name)` to get a collection-shaped adapter. If a request resolver is registered (see "Multi-database access" below), `ctx.db` is a `MogobaseDBView` bound to the resolved tenant DB rather than the default. |
 | `runQuery(name, args)` | queries + mutations | Call another query handler. Internal names must be prefixed: `runQuery("internal.foo", args)`. |
 | `runMutation(name, args)` | queries + mutations | Call another mutation handler. |
-| `headers` | queries + mutations | Incoming request headers (from the HTTP POST or the WebSocket upgrade). Use for auth. |
+| `headers` | queries + mutations | Incoming request headers (from the HTTP POST or the WebSocket upgrade). Use for auth. `ctx.headers.get(name)` works on every transport: over HTTP it is the route's Fetch `Headers`, over both WebSocket transports a `headerView` (a real Fetch `Headers` copy that also carries Node's plain lowercase keys, so `ctx.headers.cookie` works too, and auth libraries that want a `Headers` take it). On the WebSocket each run gets its own copy, shared with that run's DB resolver call: a write to it stays with the run. So do not key a cache by the headers object (it is new every run) — key it by the value that identifies the session (`ctx.headers.get("cookie")`, the authorization header). |
 | `watch(modelName, filterOrPipeline?, options?)` | **queries only** | Opt into live-query semantics. When called, the server keeps a MongoDB change stream open and pushes updates on the open WebSocket to this query subscription. Both `useQuery` and `usePaginatedQuery` trigger a fresh handler run on every passing change-stream event — `usePaginatedQuery` re-runs the handler with the loaded window as the `limit` and pushes a new `PaginatedQueryResult`. |
 | `useDatabase(dbName)` | **server only** | Returns a `MogobaseDB` view bound to a different database **on the same cluster**. Carries schemas, indexes, and (in mutations) autoStamp + `dbValidation`. See "Multi-database access". |
 | `useRawDatabase(name)` | **server only** | `Promise<Db>`. Returns the raw MongoDB driver `Db` for a connection registered via `DB.registerDatabase(name, …)` — typically a different cluster (analytics, legacy). No autoStamp, no schema awareness. |
@@ -70,13 +76,31 @@ Accepted shapes:
 - **Bare doc filter** (e.g., `{ userId: "x" }`) — backward-compat shorthand. Auto-translated to `{ $or: [{ "fullDocument.userId": "x" }, { "operationType": "delete" }] }` so deletes still notify the subscriber even though delete events carry no `fullDocument`.
 - **Omitted** — unfiltered watch. The handler re-runs on every change to the collection.
 
-Unsupported filter operators (`$expr`, `$where`, `$elemMatch`, `$text`) throw at subscribe time. Reach for the multi-stage pipeline form when you need them — that path runs your pipeline through MongoDB itself instead of the JS matcher.
+Filter operators the JS matcher does not support (`$expr`, `$elemMatch`) are fine: such a watch gets a change stream of its own, with your filter as its `$match`, evaluated by MongoDB. It costs one open change stream per subscription instead of a share of the hub's, so prefer the supported operators on hot collections. Inside a bare filter's `$expr`, write change-event paths: `$fullDocument.total`, not `$total` — the filter's plain fields are prefixed for you, its `$expr` is not. `$where`, `$text` and `$near` cannot run in a change stream at all: such a watch watches the whole collection (every write to it re-runs the query), with a warning.
+
+**Watches follow the data.** Every run of a subscription — the first, each re-run, each loaded page — registers its watches afresh, and after the run succeeds the server diffs them against the ones it has open: new ones open, dropped ones close, unchanged ones stay open (no stream churn). So a watch built from data the handler read is safe and stays current — and when a re-run opens a watch it did not have, the subscription runs once more after it opens, so a write between that run's read and the new watch is not missed:
+
+```ts
+const ids = (await ctx.db.model("members").find({ teamId }).toArray()).map((m) => m.userId)
+ctx.watch("members", { teamId })                 // membership changes re-run the query…
+ctx.watch("posts", { authorId: { $in: ids } })   // …and the re-run watches the new member's posts
+```
+
+Watches open only after a run succeeds, so calling `watch()` before your auth check is fine: a refused run opens nothing, and a run refused later (access revoked) closes every watch the subscription held.
 
 ### `ctx.watch` options
 
-The third arg is forwarded to `collection.watch(pipeline, options)` as `ChangeStreamOptions` (e.g., `startAfter`, `resumeAfter`). Pagination options like `paginatedField` / `sortAscending` are **not** needed on `ctx.watch` anymore — they only live in `args.paginationOpts`.
+The third arg is forwarded to `collection.watch(pipeline, options)` as `ChangeStreamOptions` (e.g., `startAfter`, `resumeAfter`) when the watch has a change stream of its own (a pipeline with a non-`$match` stage); a watch on the shared hub stream uses only `ignoreFields` from it. `fullDocument` and `fullDocumentBeforeChange` are ignored: mogobase sets `fullDocument` itself, and an event only triggers a re-run, so a pre-image is never read (asking for one would kill the watch on a collection without pre-images, or on MongoDB before 6.0). Pagination options like `paginatedField` / `sortAscending` are **not** needed on `ctx.watch` anymore — they only live in `args.paginationOpts`.
 
-The server sets `fullDocument: "updateLookup"` automatically (and for `useQuery` also `fullDocumentBeforeChange: "whenAvailable"`), so those keys never need to be passed explicitly. The paginated path omits `fullDocumentBeforeChange` because change events are only used to trigger a refetch — the changed document itself isn't read.
+**`ignoreFields`** — skip updates that changed nothing the query shows:
+
+```ts
+ctx.watch("mp_payments", { organizationId }, { ignoreFields: ["reconciledAt", "splitCheckedAt"] })
+```
+
+An update whose changed paths are all in the list (or under one of them: `meta` covers `meta.at`) does not re-run the query. `updatedAt` is added automatically, since every write through mogobase stamps it. Inserts and deletes always re-run, as does an update that also changed any other field. A replace made through `ctx.db` (replaceOne, findOneAndReplace) is an update pipeline that keeps the row's createdAt/deletedAt, so it usually arrives as an update — `operationType: "update"`, its changed fields checked like any update's — but MongoDB still reports a `replace` when it logs the whole document; a watch filtering on the event type should take both: `operationType: { $in: ["update", "replace"] }`. Without the option every matching change re-runs, as before. Use it for fields a cron or a background job stamps on rows the screen lists but does not display: the stamp still matches the watch's filter, so no filter can tell it from a real change. Works on both the shared hub and a watch's own change stream; `ignoreFields` never reaches the driver.
+
+The server sets `fullDocument: "updateLookup"` automatically, so it never needs to be passed. `paginatedField` / `sortAscending` (accepted for older code) and `ignoreFields` are mogobase's own and are never forwarded to the driver.
 
 ## Multi-database access (server only)
 
@@ -107,7 +131,7 @@ query("listPosts", {
 
 Resolver semantics:
 
-- Async; receives `{ headers }` (whatever the WS upgrade or HTTP route handler passed in).
+- Async; receives `{ headers }` as a `headerView` from every door (HTTP or WebSocket): a real Fetch `Headers` copy carrying the plain lowercase keys too, so `headers["x-tenant-id"]` and `headers.get("x-tenant-id")` both work, and so does `instanceof Headers`. Before 4.0.0 it got whatever the door passed — a Fetch `Headers` over HTTP, a plain object over attachWs — so a resolver written for one read nothing on the other.
 - Returns a string → bind a `MogobaseDBView` for that DB on the default cluster.
 - Returns `null` / `undefined` → keep the default singleton (`MONGO_DB`).
 - Throws → surfaced to the caller as `DB resolver threw <err>`.
@@ -124,7 +148,7 @@ attachMogobaseWebSocket(server, "/ws", {
 })
 ```
 
-Return a database name to redirect that model's stream, `null` / `undefined` to keep the default. The handler still has to read the collection from that database itself (`ctx.useDatabase(name)`); the option only decides where the watch listens.
+Return a database name to redirect that model's stream, `null` / `undefined` to keep the default. The handler still has to read the collection from that database itself (`ctx.useDatabase(name)`); the option only decides where the watch listens. A model declared with exactly one home (`defineModel(name, schema, { databases: ["identity"] })`) is watched in that home without this option, on both transports; `watchDatabaseFor` still wins when it returns a name. A predicate or several homes keep the request's database. Or name it on the watch itself — `ctx.watch(model, filter, { dbName: "identity" })` — the plainest way, and the only one for a model placed by `DB.setModelDatabases` or a predicate: an explicit `dbName` wins over everything else.
 
 ### Pattern 2 — Explicit `ctx.useDatabase` (no resolver)
 
